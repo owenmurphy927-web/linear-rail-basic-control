@@ -37,7 +37,7 @@ const unsigned long HOMING_TIMEOUT = 10000;
 
 const float HOME_PULL_OFF_MM = 5.0;
 
-const int ERROR_LED_PIN1 = 17; //RED
+const int ERROR_LED_PIN1 = 17; //
 const int IDLE_LED_PIN = 18;  //GREEN
 const int HOME_LED_PIN = 19;  //BLUE
 AccelStepper stepper(AccelStepper::DRIVER, STEP_PIN, DIR_PIN);

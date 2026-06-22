@@ -32,7 +32,7 @@ const float BACKOFF_SPEED = 200.0;
 const float JOG_SPEED = 1200.0;
 
 const unsigned long BACKOFF_DURATION_MS = 1000;
-const unsigned long HOME_LED_DURATION_MS = 2000;
+const unsigned long HOME_LED_DURATION_MS = 1000;
 const unsigned long HOMING_TIMEOUT = 10000;
 
 const float HOME_PULL_OFF_MM = 5.0;

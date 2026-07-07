@@ -7,12 +7,12 @@
 
 const int STEP_PIN = 26;
 const int DIR_PIN = 27;
-const int HOMING_PIN = 23;  // LOW is pressed
+const int HOMING_PIN = 23;  // HIGH is pressed - now an NC switch, so HIGH when pressed, LOW when released
 const int MS1_PIN = 32;
 const int MS2_PIN = 33;
 
-const int POS_JOG_PIN = 16;  // LOW is pressed
-const int NEG_JOG_PIN = 15;   // LOW is pressed
+const int POS_JOG_PIN = 15;  // LOW is pressed
+const int NEG_JOG_PIN = 16;   // LOW is pressed
 
 
 const long REV_STEPS = 800;  // 1/4 step mode
@@ -26,7 +26,7 @@ const float STEPS_PER_MM = REV_STEPS / MM_PER_REV;
 // Signed speeds.
 // Negative = toward home switch.
 // Positive = away from home switch.
-const float HOMING_SPEED_SLOW = -200.0;
+const float HOMING_SPEED_SLOW = -100.0;
 const float HOMING_SPEED_FAST = -600.0;
 const float BACKOFF_SPEED = 200.0;
 const float JOG_SPEED = 1200.0;
@@ -43,7 +43,7 @@ const int HOME_LED_PIN = 19;  //BLUE
 AccelStepper stepper(AccelStepper::DRIVER, STEP_PIN, DIR_PIN);
 
 bool homeButtonPressed() {
-  return digitalRead(HOMING_PIN) == LOW;
+  return digitalRead(HOMING_PIN) == HIGH;  // HIGH is pressed - now an NC switch, so HIGH when pressed, LOW when released
 }
 
 bool posJogPressed() {
@@ -290,7 +290,7 @@ void setup() {
 
   microStep(LOW, HIGH);
 
-  stepper.setPinsInverted(true, false, false);
+  stepper.setPinsInverted(true, false, false); 
 
   stepper.setMaxSpeed(6000);
   stepper.setAcceleration(3000);
@@ -366,6 +366,8 @@ void loop() {
 
     case Mode::IDLE:
       idleLight(HIGH);
+      stepper.setSpeed(0);
+      stepper.setCurrentPosition(stepper.currentPosition()); // Prevents motor from drifting when idle
       stepper.run();
         if (posJogPressed() || negJogPressed()) {
           changeState(Mode::JOGGING);
@@ -383,18 +385,16 @@ void loop() {
         } else if (posJogPressed() && negJogPressed()) { // If both buttons are pressed, stop movement (safety feature)
           stepper.setSpeed(0); 
           stepper.run();
-        } else {
-          changeState(Mode::IDLE);
+        } else {          
           stepper.moveTo(stepper.currentPosition()); //stops motor returning to initial idle position
+          changeState(Mode::IDLE);
         }
         break;
 
     case Mode::ERROR:
-      stepper.setSpeed(0);
-      stepper.stop();
-
+      stepper.setSpeed(0); 
+      stepper.stop(); 
       
-
       switch (errorMode) {
         case ErrorMode::NO_ERROR:
         

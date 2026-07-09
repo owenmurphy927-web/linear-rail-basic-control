@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <AccelStepper.h>
 #include <math.h>
+#include "Encoder.h"
 
 const int STEP_PIN = 26;
 const int DIR_PIN = 27;
@@ -14,6 +15,9 @@ const int MS2_PIN = 33;
 const int POS_JOG_PIN = 15;  // LOW is pressed
 const int NEG_JOG_PIN = 16;   // LOW is pressed
 
+const int ENCODER_SDA_PIN = 21;
+const int ENCODER_SCL_PIN = 22;
+
 
 const long REV_STEPS = 800;  // 1/4 step mode
 const int PULLEY_TEETH = 16;
@@ -23,13 +27,16 @@ const float MM_PER_REV = PULLEY_TEETH * BELT_PITCH_MM;
 
 const float STEPS_PER_MM = REV_STEPS / MM_PER_REV;
 
+const float POSITION_MISMATCH_TOLERANCE_MM = 0.5;  // starting point -- tune after watching normal-run "Pos Diff mm"
+const bool POSITION_MISMATCH_HALT_ENABLED = true;  // DEBUG: false disables the hard-stop so mismatch can be observed live. Set true once direction/scale calibration is confirmed.
+
 // Signed speeds.
 // Negative = toward home switch.
 // Positive = away from home switch.
 const float HOMING_SPEED_SLOW = -100.0;
 const float HOMING_SPEED_FAST = -600.0;
 const float BACKOFF_SPEED = 200.0;
-const float JOG_SPEED = 1200.0;
+const float JOG_SPEED = 400.0;
 
 const unsigned long BACKOFF_DURATION_MS = 1000;
 const unsigned long HOME_LED_DURATION_MS = 1000;
@@ -67,6 +74,15 @@ void goToMm(float mm) {
   stepper.moveTo(mmToSteps(mm));
 }
 
+float positionDiffMm() {
+  float stepperMm = stepper.currentPosition() / STEPS_PER_MM;
+  return stepperMm - railEncoder.positionMm();
+}
+
+bool positionMismatchDetected() {
+  return fabs(positionDiffMm()) > POSITION_MISMATCH_TOLERANCE_MM;
+}
+
 enum class Mode {
   HOMING,
   IDLE,
@@ -86,6 +102,8 @@ enum class HomingPhase {
 enum class ErrorMode {
   NO_ERROR,
   HOMING_TIMEOUT,
+  POSITION_MISMATCH,
+  ENCODER_NOT_DETECTED,
   UNKNOWN
 };
 
@@ -117,6 +135,8 @@ ErrorMode errorMode = ErrorMode::NO_ERROR;
 unsigned long stateStartTime = 0;
 unsigned long phaseStartTime = 0;
 unsigned long modeStartTime = 0;
+
+float maxAbsPositionDiffMm = 0.0f;
 
 void changeState(Mode nextState) {
   mode = nextState;
@@ -208,6 +228,12 @@ void idleLight(bool state) {
       case ErrorMode::HOMING_TIMEOUT:
         return "HOMING_TIMEOUT";  // PLACEHOLDER MESSAGE
 
+      case ErrorMode::POSITION_MISMATCH:
+        return "POSITION_MISMATCH";  // PLACEHOLDER MESSAGE
+
+      case ErrorMode::ENCODER_NOT_DETECTED:
+        return "ENCODER_NOT_DETECTED";  // PLACEHOLDER MESSAGE
+
       case ErrorMode::UNKNOWN:
         return "UNKNOWN_ERROR";  // PLACEHOLDER MESSAGE
 
@@ -265,6 +291,30 @@ void idleLight(bool state) {
     Serial.print(speedMmPerSec, 2);
     Serial.print(" mm/s");
 
+    Serial.print(" | Encoder mm: ");
+    Serial.print(railEncoder.positionMm(), 2);
+
+    Serial.print(" | Encoder deg: ");
+    Serial.print(railEncoder.rawAngleDeg(), 1);
+
+    Serial.print(" | Encoder ticks: ");
+    Serial.print(railEncoder.rawTicks());
+
+    Serial.print(" | Encoder Connected: ");
+    Serial.print(railEncoder.isConnected() ? "YES" : "NO");
+
+    Serial.print(" | Encoder Err: ");
+    Serial.print(railEncoder.lastError());
+
+    Serial.print(" | Pos Diff mm: ");
+    Serial.print(carriagePositionMm - railEncoder.positionMm(), 3);
+
+    Serial.print(" | Would Mismatch: ");
+    Serial.print(positionMismatchDetected() ? "YES" : "NO");
+
+    Serial.print(" | Max |Diff| mm: ");
+    Serial.print(maxAbsPositionDiffMm, 3);
+
     Serial.println();
   }
 //CGPT ADDITION - FOR PRINTING ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -295,12 +345,21 @@ void setup() {
   stepper.setMaxSpeed(6000);
   stepper.setAcceleration(3000);
 
-  changeState(Mode::HOMING);
-  changeHomingPhase(HomingPhase::FAST_APPROACH);
-  changeErrorMode(ErrorMode::NO_ERROR);
+  bool encoderOk = railEncoder.begin(ENCODER_SDA_PIN, ENCODER_SCL_PIN, MM_PER_REV, AS5600_COUNTERCLOCK_WISE);
+
+  if (!encoderOk) {
+    changeErrorMode(ErrorMode::ENCODER_NOT_DETECTED);
+    changeState(Mode::ERROR);
+  } else {
+    changeState(Mode::HOMING);
+    changeHomingPhase(HomingPhase::FAST_APPROACH);
+    changeErrorMode(ErrorMode::NO_ERROR);
+  }
 }
 
 void loop() {
+  railEncoder.update();
+
   switch (mode) {
 
     case Mode::HOMING:
@@ -345,6 +404,8 @@ void loop() {
         case HomingPhase::SET_ZERO:
           if (stepper.distanceToGo() == 0) {
             stepper.setCurrentPosition(0);
+            railEncoder.zero();
+            maxAbsPositionDiffMm = 0.0f;
             changeHomingPhase(HomingPhase::HOMING_FINISHED);
           } else {
             stepper.run();
@@ -402,6 +463,12 @@ void loop() {
         case ErrorMode::HOMING_TIMEOUT:
           errorLight1(HIGH);
           break;
+        case ErrorMode::POSITION_MISMATCH:
+          errorLight1(HIGH);
+          break;
+        case ErrorMode::ENCODER_NOT_DETECTED:
+          errorLight1(HIGH);
+          break;
         case ErrorMode::UNKNOWN:
           
           break;
@@ -409,6 +476,21 @@ void loop() {
       break;
   }
 
+  if (mode == Mode::IDLE || mode == Mode::JOGGING) {
+    if (!railEncoder.isConnected()) {
+      changeErrorMode(ErrorMode::ENCODER_NOT_DETECTED);
+      changeState(Mode::ERROR);
+    } else {
+      float diffMm = fabs(positionDiffMm());
+      if (diffMm > maxAbsPositionDiffMm) {
+        maxAbsPositionDiffMm = diffMm;
+      }
+      if (POSITION_MISMATCH_HALT_ENABLED && diffMm > POSITION_MISMATCH_TOLERANCE_MM) {
+        changeErrorMode(ErrorMode::POSITION_MISMATCH);
+        changeState(Mode::ERROR);
+      }
+    }
+  }
 
 //CGPT ADDITION - FOR PRINTING....................
   printStatus();

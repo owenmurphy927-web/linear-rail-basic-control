@@ -37,7 +37,7 @@ const bool POSITION_MISMATCH_HALT_ENABLED = false;  // DEBUG: false disables the
 const float HOMING_SPEED_SLOW = -100.0;
 const float HOMING_SPEED_FAST = -600.0;
 const float BACKOFF_SPEED = 200.0;
-const float JOG_SPEED = 1600.0;
+const float JOG_SPEED = 2400.0;
 
 const unsigned long BACKOFF_DURATION_MS = 1000;
 const unsigned long HOME_LED_DURATION_MS = 1000;
@@ -59,8 +59,18 @@ const int IDLE_LED_PIN = 18;  //GREEN
 const int HOME_LED_PIN = 19;  //BLUE
 
 // Motion tuning. MAX_SPEED_HZ is applied per positioning move; ACCEL is set once in setup().
-const uint32_t MAX_SPEED_HZ = 6000;
-const uint32_t ACCEL_STEPS_PER_S2 = 3000;
+const uint32_t MAX_SPEED_HZ = 1600;
+const uint32_t ACCEL_STEPS_PER_S2 = 8000;
+
+// ---- Closed-loop position control (encoder feedback) ----
+// Active ONLY when controlMode == CLOSED_LOOP (see below); the OPEN_LOOP path is unchanged.
+// Proportional servo that drives the ENCODER (not the step count) onto the commanded
+// setpoint. All LIVE-TUNED against real hardware, like POSITION_MISMATCH_TOLERANCE_MM.
+const float    CL_KP                  = 0.6f;         // proportional gain: mm of target-adjust per mm of encoder error
+const float    CL_DEADBAND_MM         = 0.10f;        // no correction while |setpoint - encoder| <= this (kills hold dither)
+const float    CL_MAX_CORRECTION_MM   = 8.0f;         // clamp per-tick target adjustment (keeps target near actual -> no ripple)
+const unsigned long CL_UPDATE_INTERVAL_MS = 20;       // servo tick throttle (>= encoder 10ms poll)
+const uint32_t CL_CORRECTION_SPEED_HZ = MAX_SPEED_HZ; // speed cap for hold-correction moves
 
 // FastAccelStepper generates step pulses in hardware (ESP32 RMT/MCPWM), so pulse timing is
 // independent of loop()/printStatus() timing -- loop() no longer services motion every iteration.
@@ -146,6 +156,53 @@ float positionDiffMm() {
 
 bool positionMismatchDetected() {
   return fabs(positionDiffMm()) > POSITION_MISMATCH_TOLERANCE_MM;
+}
+
+// Closed-loop state. clSetpointMm is the position (shared mm frame) the encoder should
+// reach/hold. clInHold latches a hold setpoint once on entry (see closedLoopHold). For a
+// travel-to-endpoint the endpoint branches set clSetpointMm in BOTH control modes so the
+// telemetry sp=/cerr= fields log the same target open- and closed-loop (comparable A/B
+// data); the hold latch and all motion effects are closed-loop only.
+float clSetpointMm = 0.0f;
+bool  clInHold = false;
+
+// Closed-loop proportional position servo. Called only from the CLOSED_LOOP branches of
+// the state machine. Drives the ENCODER onto setpointMm by nudging the stepper's moveTo
+// target (reuses the command cache via commandMoveTo -- never touches FastAccelStepper
+// directly). Self-throttled to CL_UPDATE_INTERVAL_MS; between ticks the last commanded
+// target simply holds. Deadband suppresses hold dither; the per-tick clamp keeps the
+// target close to actual so travel stays a smooth cruise (no velocity ripple).
+void closedLoopServoTo(float setpointMm, uint32_t speedHz) {
+  if (!stepper) return;
+  static unsigned long lastTick = 0;
+  if (millis() - lastTick < CL_UPDATE_INTERVAL_MS) return;
+  lastTick = millis();
+
+  float errMm = setpointMm - railEncoder.positionMm();   // drive the encoder to setpoint
+  if (fabsf(errMm) <= CL_DEADBAND_MM) return;             // in band: hold last target
+
+  float corrMm = CL_KP * errMm;
+  if (corrMm >  CL_MAX_CORRECTION_MM) corrMm =  CL_MAX_CORRECTION_MM;
+  if (corrMm < -CL_MAX_CORRECTION_MM) corrMm = -CL_MAX_CORRECTION_MM;
+
+  commandMoveTo(stepper->getCurrentPosition() + mmToSteps(corrMm), speedHz);
+}
+
+// Closed-loop "stop and hold here". First entry: if still moving, ramp to a natural stop
+// exactly like the open-loop commandVelocity(0) (so the stopping feel is identical and the
+// carriage doesn't snap back); only once actually stopped does it latch that rest position
+// as the hold setpoint. Thereafter it servos the encoder to that setpoint to reject drift.
+void closedLoopHold() {
+  if (!stepper) return;
+  if (!clInHold) {
+    if (stepper->isRunning()) {
+      commandVelocity(0);                       // decelerate to a stop, same as open loop
+      return;                                   // latch only after it has actually stopped
+    }
+    clSetpointMm = railEncoder.positionMm();     // hold where it came to rest
+    clInHold = true;
+  }
+  closedLoopServoTo(clSetpointMm, CL_CORRECTION_SPEED_HZ);
 }
 
 enum class Mode {
@@ -351,15 +408,17 @@ void idleLight(bool state) {
     float velMms = velSps / STEPS_PER_MM;
     float encMm  = railEncoder.positionMm();
 
-    char buf[200];
+    char buf[256];
     snprintf(buf, sizeof(buf),
       "ctrl=%s mode=%s phase=%s err=%s "
       "pos=%.2f vsps=%.1f vmms=%.2f enc=%.2f dpos=%.3f dmax=%.3f "
+      "sp=%.2f cerr=%.3f "
       "mis=%d econn=%d eerr=%d lim=%d%d led=%d%d%d",
       controlModeText(controlMode), modeText(mode),
       (mode == Mode::HOMING) ? homingPhaseText(homingPhase) : "-",
       (mode == Mode::ERROR)  ? errorModeText(errorMode)     : "-",
       posMm, velSps, velMms, encMm, posMm - encMm, maxAbsPositionDiffMm,
+      clSetpointMm, clSetpointMm - encMm,
       positionMismatchDetected() ? 1 : 0,
       railEncoder.isConnected() ? 1 : 0, railEncoder.lastError(),
       homeButtonPressed() ? 1 : 0, farLimitPressed() ? 1 : 0,
@@ -496,6 +555,7 @@ void loop() {
             stepper->setCurrentPosition(0);
             railEncoder.zero();
             maxAbsPositionDiffMm = 0.0f;
+            clSetpointMm = 0.0f; clInHold = false;   // re-latch the closed-loop hold on next IDLE entry
             changeHomingPhase(HomingPhase::HOMING_FINISHED);
           }
           break;
@@ -514,7 +574,11 @@ void loop() {
 
     case Mode::IDLE:
       idleLight(HIGH);
-      commandVelocity(0);                        // ensure stopped; hardware holds position when idle
+      if (controlMode == ControlMode::CLOSED_LOOP) {
+        closedLoopHold();                        // hold position under encoder feedback
+      } else {
+        commandVelocity(0);                      // OPEN-LOOP: ensure stopped; hardware holds position when idle
+      }
         if (posJogPressed() || negJogPressed()) {
           changeState(Mode::JOGGING);
           idleLight(LOW);
@@ -528,14 +592,37 @@ void loop() {
         // switch -- at any jog speed. (The old velocity+reactive-stop overshot by v^2/(2a), which grew
         // with jog speed until it reached the switch.) Held mid-travel it cruises at JOG_SPEED toward
         // the limit; released mid-travel it ramps to a stop.
-        if (posJogPressed() && negJogPressed()) { 
-          commandVelocity(0);
+        // Endpoint branches set clSetpointMm in BOTH modes so telemetry (sp=/cerr=) logs the
+        // same target open- and closed-loop; the CLOSED_LOOP branch additionally servos the
+        // encoder onto it while the OL statements stay byte-for-byte the original behavior.
+        // Hold cases go through closedLoopHold() (CL) / commandVelocity(0) (OL). "Both
+        // buttons" stays the first-checked stop (a deliberate safety stop).
+        if (posJogPressed() && negJogPressed()) {
+          if (controlMode == ControlMode::CLOSED_LOOP) {
+            closedLoopHold();
+          } else {
+            commandVelocity(0);
+          }
         } else if (posJogPressed()) {
-          commandMoveTo(mmToSteps(JOG_MAX_POSITION_MM), (uint32_t)JOG_SPEED);
+          clInHold = false; clSetpointMm = JOG_MAX_POSITION_MM;
+          if (controlMode == ControlMode::CLOSED_LOOP) {
+            closedLoopServoTo(clSetpointMm, (uint32_t)JOG_SPEED);
+          } else {
+            commandMoveTo(mmToSteps(JOG_MAX_POSITION_MM), (uint32_t)JOG_SPEED);
+          }
         } else if (negJogPressed()) {
-          commandMoveTo(mmToSteps(JOG_MIN_POSITION_MM), (uint32_t)JOG_SPEED);
+          clInHold = false; clSetpointMm = JOG_MIN_POSITION_MM;
+          if (controlMode == ControlMode::CLOSED_LOOP) {
+            closedLoopServoTo(clSetpointMm, (uint32_t)JOG_SPEED);
+          } else {
+            commandMoveTo(mmToSteps(JOG_MIN_POSITION_MM), (uint32_t)JOG_SPEED);
+          }
         } else {
-          commandVelocity(0);                    // release -> ramp to a stop and hold, back to IDLE
+          if (controlMode == ControlMode::CLOSED_LOOP) {
+            closedLoopHold();                    // ramp to a stop, then hold, back to IDLE
+          } else {
+            commandVelocity(0);                  // release -> ramp to a stop and hold, back to IDLE
+          }
           changeState(Mode::IDLE);
         }
         break;

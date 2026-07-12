@@ -30,7 +30,7 @@ The failsafe is a **mode-independent guard at the top of `loop()`** (right after
 
 - `ERROR` is terminal (no coded path out), so an over-travel trip **latches until reset/re-home**. This is deliberate: a runaway open- or closed-loop controller commanding motion into the limit cannot keep fighting it. This guard is a genuine failsafe layer for any future closed-loop demo, not just jog protection — it required no changes to the jog logic and covers any mode added later automatically.
 - Outside homing, the **home switch doubles as the near-end limit**. This is safe because `SET_ZERO` backs the carriage `HOME_PULL_OFF_MM` (5mm) off the switch before zeroing and `HOMING_FINISHED` sends it to 20mm, so the switch is released on entry to `IDLE` — no false trigger right after homing.
-- These are **hard-switch limits only**; there are no soft (position/step-count-based) limits.
+- The hard-switch failsafe above is the real safety layer and applies in every non-`HOMING`/`ERROR` mode. On top of it, **`Mode::JOGGING` now also enforces soft (position/step-count-based) limits**: jogging stops and holds at `JOG_MIN_POSITION_MM`/`JOG_MAX_POSITION_MM` (0mm–111.3mm, a 5mm buffer off each switch), so a jog reaching the end of travel simply halts instead of driving into a switch and tripping `OVER_TRAVEL`. These bounds are derived from `HOME_PULL_OFF_MM` and `FAR_LIMIT_POSITION_MM` (the far switch measured at 116.3mm from zero); the far end is a measured constant, not homed to. Soft limits are a jog convenience only — they do not replace the hard-switch failsafe.
 
 ## Calibration history
 

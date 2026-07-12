@@ -27,7 +27,9 @@ No pin conflicts between the stepper/switch/LED/jog set and the encoder's I2C pa
 - `REV_STEPS = 800` — steps per motor revolution at the driver's configured 1/4-microstep setting.
 - `PULLEY_TEETH = 16`, `BELT_PITCH_MM = 2.0` → `MM_PER_REV = 32mm` of carriage travel per pulley revolution.
 - `STEPS_PER_MM = REV_STEPS / MM_PER_REV = 25 steps/mm`.
-- `HOME_PULL_OFF_MM = 5.0` — distance backed off the limit switch before the final slow re-approach during homing.
+- `HOME_PULL_OFF_MM = 5.0` — distance backed off the limit switch before the final slow re-approach during homing. Also places the near-switch trigger point at `-HOME_PULL_OFF_MM` relative to zero.
+- `FAR_LIMIT_POSITION_MM = 116.3` — far switch trigger point, measured once from zero (not homed to). Full travel = `FAR_LIMIT_POSITION_MM + HOME_PULL_OFF_MM = 121.3mm`.
+- `SOFT_LIMIT_BUFFER_MM = 5.0` — jog soft-limit keep-out off each switch. Jog bounds: `JOG_MIN_POSITION_MM = -HOME_PULL_OFF_MM + SOFT_LIMIT_BUFFER_MM = 0mm`, `JOG_MAX_POSITION_MM = FAR_LIMIT_POSITION_MM - SOFT_LIMIT_BUFFER_MM = 111.3mm`.
 
 ## Encoder mounting
 

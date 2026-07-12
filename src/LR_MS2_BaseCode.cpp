@@ -45,6 +45,14 @@ const unsigned long HOMING_TIMEOUT = 10000;
 
 const float HOME_PULL_OFF_MM = 5.0;
 
+const float FAR_LIMIT_POSITION_MM = 116.3;   // far switch trigger point, measured from zero
+const float SOFT_LIMIT_BUFFER_MM  = 5.0;     // keep-out from each switch for jogging soft limits
+
+// Soft jog bounds (open-loop step position, mm). Derived from the switch trigger points so they
+// track HOME_PULL_OFF_MM automatically. Near switch sits at -HOME_PULL_OFF_MM.
+const float JOG_MIN_POSITION_MM = -HOME_PULL_OFF_MM + SOFT_LIMIT_BUFFER_MM;     // = 0.0mm
+const float JOG_MAX_POSITION_MM = FAR_LIMIT_POSITION_MM - SOFT_LIMIT_BUFFER_MM; // = 111.3mm
+
 const int ERROR_LED_PIN1 = 17; //
 const int IDLE_LED_PIN = 18;  //GREEN
 const int HOME_LED_PIN = 19;  //BLUE
@@ -469,15 +477,27 @@ void loop() {
     
     case Mode::JOGGING:
         if (posJogPressed()) {
-          stepper.setSpeed(JOG_SPEED);
-          stepper.runSpeed();
+          if (stepper.currentPosition() >= mmToSteps(JOG_MAX_POSITION_MM)) {
+            stepper.setSpeed(0);
+            stepper.moveTo(stepper.currentPosition());
+            stepper.run();                       // hold at soft max, stay in JOGGING
+          } else {
+            stepper.setSpeed(JOG_SPEED);
+            stepper.runSpeed();
+          }
         } else if (negJogPressed()) {
-          stepper.setSpeed(-JOG_SPEED);
-          stepper.runSpeed();          
+          if (stepper.currentPosition() <= mmToSteps(JOG_MIN_POSITION_MM)) {
+            stepper.setSpeed(0);
+            stepper.moveTo(stepper.currentPosition());
+            stepper.run();                       // hold at soft min, stay in JOGGING
+          } else {
+            stepper.setSpeed(-JOG_SPEED);
+            stepper.runSpeed();
+          }
         } else if (posJogPressed() && negJogPressed()) { // If both buttons are pressed, stop movement (safety feature)
-          stepper.setSpeed(0); 
+          stepper.setSpeed(0);
           stepper.run();
-        } else {          
+        } else {
           stepper.moveTo(stepper.currentPosition()); //stops motor returning to initial idle position
           changeState(Mode::IDLE);
         }

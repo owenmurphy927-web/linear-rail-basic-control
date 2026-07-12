@@ -1,6 +1,6 @@
 # Hardware / Pinout
 
-ESP32 dev board (`esp32dev`) driving a belt-and-pulley linear rail through a STEP/DIR stepper driver, with a limit switch for homing, two manual jog buttons, three status LEDs, and an AS5600 magnetic encoder on I2C for position-feedback verification.
+ESP32 dev board (`esp32dev`) driving a belt-and-pulley linear rail through a STEP/DIR stepper driver, with two end-of-travel limit switches (home/near end used for homing, plus a far end), two manual jog buttons, three status LEDs, and an AS5600 magnetic encoder on I2C for position-feedback verification.
 
 ## Pin assignments
 
@@ -8,7 +8,8 @@ ESP32 dev board (`esp32dev`) driving a belt-and-pulley linear rail through a STE
 |---|---|---|
 | 26 | `STEP_PIN` | Stepper driver STEP |
 | 27 | `DIR_PIN` | Stepper driver DIR |
-| 23 | `HOMING_PIN` | Home limit switch — wired NC, so HIGH = pressed, LOW = released. `INPUT_PULLUP`. |
+| 23 | `HOMING_PIN` | Home limit switch (near-end limit) — wired NC, so HIGH = pressed, LOW = released. `INPUT_PULLUP`. Used for homing; also acts as the near-end over-travel limit outside homing. |
+| 13 | `FAR_LIMIT_PIN` | Far end-of-travel limit switch — wired NC, so HIGH = pressed. `INPUT_PULLUP`. Over-travel failsafe only (not used during homing). |
 | 32 | `MS1_PIN` | Microstep select 1 |
 | 33 | `MS2_PIN` | Microstep select 2 (driver held at 1/4-step: MS1=LOW, MS2=HIGH) |
 | 15 | `POS_JOG_PIN` | Positive-direction jog button, active LOW. `INPUT_PULLUP`. |
@@ -19,7 +20,7 @@ ESP32 dev board (`esp32dev`) driving a belt-and-pulley linear rail through a STE
 | 21 | `ENCODER_SDA_PIN` | AS5600 I2C SDA |
 | 22 | `ENCODER_SCL_PIN` | AS5600 I2C SCL |
 
-No pin conflicts between the stepper/switch/LED/jog set and the encoder's I2C pair.
+No pin conflicts between the stepper/switch/LED/jog set and the encoder's I2C pair. `FAR_LIMIT_PIN` (GPIO 13) is a general-purpose input — not a strapping pin and supports the internal pull-up.
 
 ## Mechanical constants
 

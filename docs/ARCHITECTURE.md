@@ -6,7 +6,7 @@
 
 - **`Mode`** — the top-level state: `HOMING → IDLE ⇄ JOGGING`, plus `ERROR` (terminal; there's no coded path back out of it).
 - **`HomingPhase`** — sub-states active only while `mode == HOMING`: `FAST_APPROACH → BACK_OFF → SLOW_APPROACH → SET_ZERO → HOMING_FINISHED`. Fast approach toward the limit switch, back off, slow re-approach for an accurate trigger point, zero both position sources, then a brief LED confirmation before handing off to `IDLE`.
-- **`ErrorMode`** — sub-states active only while `mode == ERROR`: `HOMING_TIMEOUT`, `POSITION_MISMATCH`, `ENCODER_NOT_DETECTED`, `UNKNOWN`. All three real error causes light the same LED (`ERROR_LED_PIN1`) — there's only one spare LED, so the serial telemetry is what actually disambiguates which error fired.
+- **`ErrorMode`** — sub-states active only while `mode == ERROR`: `HOMING_TIMEOUT`, `POSITION_MISMATCH`, `ENCODER_NOT_DETECTED`, `OVER_TRAVEL`, `UNKNOWN`. All real error causes light the same LED (`ERROR_LED_PIN1`) — there's only one spare LED, so the serial telemetry is what actually disambiguates which error fired.
 
 `loop()` is one large `switch(mode)`, with a nested `switch(homingPhase)` inside `HOMING` and a nested `switch(errorMode)` inside `ERROR`.
 
@@ -21,6 +21,16 @@ This was a deliberate scope decision: the AS5600 magnetic encoder was added pure
 The mismatch check (in `loop()`, gated to `IDLE`/`JOGGING`) compares `stepper.currentPosition()/STEPS_PER_MM` against `railEncoder.positionMm()`:
 - **`ENCODER_NOT_DETECTED`** fires immediately and always halts into `Mode::ERROR` if the encoder drops off I2C — including a failed `railEncoder.begin()` at boot.
 - **`POSITION_MISMATCH`** fires when the two diverge past `POSITION_MISMATCH_TOLERANCE_MM`, but only actually halts the system if `POSITION_MISMATCH_HALT_ENABLED` is `true`. A running `maxAbsPositionDiffMm` and a live `Would Mismatch` flag are always tracked/printed regardless of the halt toggle, so the mismatch condition can be observed without it stopping the rail.
+
+## Over-travel failsafe (hard position limits)
+
+Two physical end-of-travel switches bound carriage motion: the home switch (`HOMING_PIN`, the near end) and a far-end switch (`FAR_LIMIT_PIN`). Both are wired NC (`HIGH` = pressed, `INPUT_PULLUP`), so a broken or disconnected switch lead reads as *triggered* — fail-safe.
+
+The failsafe is a **mode-independent guard at the top of `loop()`** (right after `railEncoder.update()`, before `switch(mode)`), separate from the jog logic: if `overTravelTriggered()` (either switch) is true in any mode **except `HOMING` and `ERROR`**, it immediately zeroes speed and latches into `Mode::ERROR` with `ErrorMode::OVER_TRAVEL`. Because it sits above `switch(mode)`, the `ERROR` case runs the same iteration, so no further step pulses issue — the halt is immediate. `HOMING` is excluded so homing can still deliberately drive into the home switch; `ERROR` is excluded so `modeStartTime` isn't re-stamped every cycle once already halted.
+
+- `ERROR` is terminal (no coded path out), so an over-travel trip **latches until reset/re-home**. This is deliberate: a runaway open- or closed-loop controller commanding motion into the limit cannot keep fighting it. This guard is a genuine failsafe layer for any future closed-loop demo, not just jog protection — it required no changes to the jog logic and covers any mode added later automatically.
+- Outside homing, the **home switch doubles as the near-end limit**. This is safe because `SET_ZERO` backs the carriage `HOME_PULL_OFF_MM` (5mm) off the switch before zeroing and `HOMING_FINISHED` sends it to 20mm, so the switch is released on entry to `IDLE` — no false trigger right after homing.
+- These are **hard-switch limits only**; there are no soft (position/step-count-based) limits.
 
 ## Calibration history
 

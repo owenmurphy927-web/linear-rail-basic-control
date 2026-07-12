@@ -9,6 +9,7 @@
 const int STEP_PIN = 26;
 const int DIR_PIN = 27;
 const int HOMING_PIN = 23;  // HIGH is pressed - now an NC switch, so HIGH when pressed, LOW when released
+const int FAR_LIMIT_PIN = 13;  // NC switch, HIGH = pressed (matches HOMING_PIN), INPUT_PULLUP. Far end-of-travel limit.
 const int MS1_PIN = 32;
 const int MS2_PIN = 33;
 
@@ -51,6 +52,14 @@ AccelStepper stepper(AccelStepper::DRIVER, STEP_PIN, DIR_PIN);
 
 bool homeButtonPressed() {
   return digitalRead(HOMING_PIN) == HIGH;  // HIGH is pressed - now an NC switch, so HIGH when pressed, LOW when released
+}
+
+bool farLimitPressed() {
+  return digitalRead(FAR_LIMIT_PIN) == HIGH;  // NC: HIGH is pressed
+}
+
+bool overTravelTriggered() {
+  return homeButtonPressed() || farLimitPressed();  // either end-of-travel switch
 }
 
 bool posJogPressed() {
@@ -104,6 +113,7 @@ enum class ErrorMode {
   HOMING_TIMEOUT,
   POSITION_MISMATCH,
   ENCODER_NOT_DETECTED,
+  OVER_TRAVEL,
   UNKNOWN
 };
 
@@ -180,7 +190,7 @@ void idleLight(bool state) {
 }
 
 //CGPT ADDITION - FOR PRINTING..............................................
-    const unsigned long PRINT_INTERVAL_MS = 250;  // PLACEHOLDER: choose print rate
+    const unsigned long PRINT_INTERVAL_MS = 500;  // PLACEHOLDER: choose print rate
 
   const char* modeText(Mode currentMode) {
     switch (currentMode) {
@@ -233,6 +243,9 @@ void idleLight(bool state) {
 
       case ErrorMode::ENCODER_NOT_DETECTED:
         return "ENCODER_NOT_DETECTED";  // PLACEHOLDER MESSAGE
+
+      case ErrorMode::OVER_TRAVEL:
+        return "OVER_TRAVEL";  // PLACEHOLDER MESSAGE
 
       case ErrorMode::UNKNOWN:
         return "UNKNOWN_ERROR";  // PLACEHOLDER MESSAGE
@@ -315,6 +328,10 @@ void idleLight(bool state) {
     Serial.print(" | Max |Diff| mm: ");
     Serial.print(maxAbsPositionDiffMm, 3);
 
+    Serial.print(" | Limits H/F: ");
+    Serial.print(homeButtonPressed() ? "1" : "0");
+    Serial.print(farLimitPressed() ? "1" : "0");
+
     Serial.println();
   }
 //CGPT ADDITION - FOR PRINTING ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -326,6 +343,7 @@ void setup() {
   Serial.begin(115200);
 
   pinMode(HOMING_PIN, INPUT_PULLUP);
+  pinMode(FAR_LIMIT_PIN, INPUT_PULLUP);
   pinMode(POS_JOG_PIN, INPUT_PULLUP);
   pinMode(NEG_JOG_PIN, INPUT_PULLUP);
 
@@ -359,6 +377,19 @@ void setup() {
 
 void loop() {
   railEncoder.update();
+
+  // Over-travel failsafe: an end-of-travel switch trip in any mode but HOMING
+  // immediately halts and latches into ERROR. Placed above switch(mode) so the
+  // ERROR case runs this same iteration (no further step pulses issue). HOMING is
+  // excluded so homing can still drive into the home switch; ERROR is excluded so
+  // we don't re-stamp modeStartTime every cycle once already halted.
+  if (mode != Mode::HOMING && mode != Mode::ERROR) {
+    if (overTravelTriggered()) {
+      stepper.setSpeed(0);
+      changeErrorMode(ErrorMode::OVER_TRAVEL);
+      changeState(Mode::ERROR);
+    }
+  }
 
   switch (mode) {
 
@@ -467,6 +498,9 @@ void loop() {
           errorLight1(HIGH);
           break;
         case ErrorMode::ENCODER_NOT_DETECTED:
+          errorLight1(HIGH);
+          break;
+        case ErrorMode::OVER_TRAVEL:
           errorLight1(HIGH);
           break;
         case ErrorMode::UNKNOWN:

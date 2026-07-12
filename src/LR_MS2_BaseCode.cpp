@@ -175,6 +175,12 @@ enum class ErrorMode {
   UNKNOWN
 };
 
+// Open-loop step counting is what drives motion today; the encoder is verification only. This flips
+// to CLOSED_LOOP once the toggleable closed-loop position mode lands -- printed as ctrl= so logs
+// record which controller was active.
+enum class ControlMode { OPEN_LOOP, CLOSED_LOOP };
+ControlMode controlMode = ControlMode::OPEN_LOOP;
+
 // Manual declare function prototypes so Arduino IDE doesn't guess wrong -- from ChatGPT - weird way IDE defines functions
 void changeState(Mode nextState);
 void changeHomingPhase(HomingPhase nextPhase);
@@ -191,7 +197,7 @@ void homeLight(bool state);
   const char* modeText(Mode currentMode);
   const char* homingPhaseText(HomingPhase currentPhase);
   const char* errorModeText(ErrorMode currentError);
-  const char* ledText(bool state);
+  const char* controlModeText(ControlMode m);
   void printStatus();
 //CGPT ADDITION - FOR PRINTING ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -258,6 +264,9 @@ void idleLight(bool state) {
       case Mode::IDLE:
         return "IDLE";  // PLACEHOLDER MESSAGE
 
+      case Mode::JOGGING:
+        return "JOGGING";
+
       case Mode::ERROR:
         return "ERROR";  // PLACEHOLDER MESSAGE
 
@@ -269,58 +278,58 @@ void idleLight(bool state) {
   const char* homingPhaseText(HomingPhase currentPhase) {
     switch (currentPhase) {
       case HomingPhase::FAST_APPROACH:
-        return "FAST_APPROACH";  // PLACEHOLDER MESSAGE
+        return "FAST";
 
       case HomingPhase::BACK_OFF:
-        return "BACK_OFF";  // PLACEHOLDER MESSAGE
+        return "BACK";
 
       case HomingPhase::SLOW_APPROACH:
-        return "SLOW_APPROACH";  // PLACEHOLDER MESSAGE
+        return "SLOW";
 
       case HomingPhase::STOP_SETTLE:
-        return "STOP_SETTLE";  // PLACEHOLDER MESSAGE
+        return "SETTLE";
 
       case HomingPhase::SET_ZERO:
-        return "SET_ZERO";  // PLACEHOLDER MESSAGE
+        return "ZERO";
 
       case HomingPhase::HOMING_FINISHED:
-        return "HOMING_FINISHED";  // PLACEHOLDER MESSAGE
+        return "DONE";
 
       default:
-        return "UNKNOWN HOMING PHASE";
+        return "UNK_PHASE";
     }
   }
 
   const char* errorModeText(ErrorMode currentError) {
     switch (currentError) {
       case ErrorMode::NO_ERROR:
-        return "NO_ERROR";  // PLACEHOLDER MESSAGE
+        return "OK";
 
       case ErrorMode::HOMING_TIMEOUT:
-        return "HOMING_TIMEOUT";  // PLACEHOLDER MESSAGE
+        return "TIMEOUT";
 
       case ErrorMode::POSITION_MISMATCH:
-        return "POSITION_MISMATCH";  // PLACEHOLDER MESSAGE
+        return "MISMATCH";
 
       case ErrorMode::ENCODER_NOT_DETECTED:
-        return "ENCODER_NOT_DETECTED";  // PLACEHOLDER MESSAGE
+        return "NO_ENC";
 
       case ErrorMode::OVER_TRAVEL:
-        return "OVER_TRAVEL";  // PLACEHOLDER MESSAGE
+        return "OVERTRVL";
 
       case ErrorMode::STEPPER_INIT_FAILED:
-        return "STEPPER_INIT_FAILED";  // PLACEHOLDER MESSAGE
+        return "STP_FAIL";
 
       case ErrorMode::UNKNOWN:
-        return "UNKNOWN_ERROR";  // PLACEHOLDER MESSAGE
+        return "UNK";
 
       default:
-        return "UNKNOWN ERROR MODE";
+        return "UNK_ERR";
     }
   }
 
-  const char* ledText(bool state) {
-    return state ? "ON" : "OFF";
+  const char* controlModeText(ControlMode m) {
+    return (m == ControlMode::CLOSED_LOOP) ? "CL" : "OL";
   }
 //CGPT ADDITION - FOR PRINTING ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -334,69 +343,31 @@ void idleLight(bool state) {
 
     lastPrintTime = millis();
 
-    float carriagePositionMm = stepper ? stepper->getCurrentPosition() / STEPS_PER_MM : 0.0f;
-    float speedStepsPerSec = stepper ? stepper->getCurrentSpeedInMilliHz() / 1000.0f : 0.0f;
-    float speedMmPerSec = speedStepsPerSec / STEPS_PER_MM;
+    // One snprintf + one Serial.println instead of ~40 Serial.print calls: fits on a single terminal
+    // line, and fewer trips through the TX path. Format is self-describing key=value so logs stay
+    // parseable as fields are added later. %f is safe here -- ESP32/newlib has full printf float support.
+    float posMm  = stepper ? stepper->getCurrentPosition() / STEPS_PER_MM : 0.0f;
+    float velSps = stepper ? stepper->getCurrentSpeedInMilliHz() / 1000.0f : 0.0f;
+    float velMms = velSps / STEPS_PER_MM;
+    float encMm  = railEncoder.positionMm();
 
-    Serial.print("State: ");
-    Serial.print(modeText(mode));
+    char buf[200];
+    snprintf(buf, sizeof(buf),
+      "ctrl=%s mode=%s phase=%s err=%s "
+      "pos=%.2f vsps=%.1f vmms=%.2f enc=%.2f dpos=%.3f dmax=%.3f "
+      "mis=%d econn=%d eerr=%d lim=%d%d led=%d%d%d",
+      controlModeText(controlMode), modeText(mode),
+      (mode == Mode::HOMING) ? homingPhaseText(homingPhase) : "-",
+      (mode == Mode::ERROR)  ? errorModeText(errorMode)     : "-",
+      posMm, velSps, velMms, encMm, posMm - encMm, maxAbsPositionDiffMm,
+      positionMismatchDetected() ? 1 : 0,
+      railEncoder.isConnected() ? 1 : 0, railEncoder.lastError(),
+      homeButtonPressed() ? 1 : 0, farLimitPressed() ? 1 : 0,
+      (digitalRead(HOME_LED_PIN)   == HIGH) ? 1 : 0,
+      (digitalRead(IDLE_LED_PIN)   == HIGH) ? 1 : 0,
+      (digitalRead(ERROR_LED_PIN1) == HIGH) ? 1 : 0);
 
-    Serial.print(" | Homing Phase: ");
-    Serial.print(homingPhaseText(homingPhase));
-
-    Serial.print(" | Error Mode: ");
-    Serial.print(errorModeText(errorMode));
-
-    Serial.print(" | Home LED: ");
-    Serial.print(ledText(digitalRead(HOME_LED_PIN)));
-
-    Serial.print(" | Idle LED: ");
-    Serial.print(ledText(digitalRead(IDLE_LED_PIN)));
-
-    Serial.print(" | Error LED 1: ");
-    Serial.print(ledText(digitalRead(ERROR_LED_PIN1)));
-
-    Serial.print(" | Position: ");
-    Serial.print(carriagePositionMm, 2);
-    Serial.print(" mm");
-
-    Serial.print(" | Speed: ");
-    Serial.print(speedStepsPerSec, 1);
-    Serial.print(" steps/s");
-
-    Serial.print(" | Speed: ");
-    Serial.print(speedMmPerSec, 2);
-    Serial.print(" mm/s");
-
-    Serial.print(" | Encoder mm: ");
-    Serial.print(railEncoder.positionMm(), 2);
-
-    Serial.print(" | Encoder deg: ");
-    Serial.print(railEncoder.rawAngleDeg(), 1);
-
-    Serial.print(" | Encoder ticks: ");
-    Serial.print(railEncoder.rawTicks());
-
-    Serial.print(" | Encoder Connected: ");
-    Serial.print(railEncoder.isConnected() ? "YES" : "NO");
-
-    Serial.print(" | Encoder Err: ");
-    Serial.print(railEncoder.lastError());
-
-    Serial.print(" | Pos Diff mm: ");
-    Serial.print(carriagePositionMm - railEncoder.positionMm(), 3);
-
-    Serial.print(" | Would Mismatch: ");
-    Serial.print(positionMismatchDetected() ? "YES" : "NO");
-
-    Serial.print(" | Max |Diff| mm: ");
-    Serial.print(maxAbsPositionDiffMm, 3);
-
-    Serial.print(" | Limits H/F: ");
-    Serial.print(homeButtonPressed() ? "1" : "0");
-    Serial.print(farLimitPressed() ? "1" : "0");
-
-    Serial.println();
+    Serial.println(buf);
   }
 //CGPT ADDITION - FOR PRINTING ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

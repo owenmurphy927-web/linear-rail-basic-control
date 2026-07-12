@@ -10,17 +10,42 @@
 
 `loop()` is one large `switch(mode)`, with a nested `switch(homingPhase)` inside `HOMING` and a nested `switch(errorMode)` inside `ERROR`.
 
-Motion itself is entirely open-loop: `FastAccelStepper` drives the stepper, generating step pulses in an ESP32 hardware peripheral (RMT/MCPWM), and `stepper->getCurrentPosition()` — a step count — is the sole authority on carriage position for control purposes. The state machine is **command-based**: it issues a velocity move (`runForward()`/`runBackward()`, for homing/jogging), a positioning move (`moveTo()`), or an immediate halt (`forceStop()`) only when the intent changes; hardware runs the move in the background and the loop polls `getCurrentPosition()`/`isRunning()`. A small command cache (`commandVelocity` / `commandMoveTo` / `commandHalt`) lets the flat `switch(mode)` keep calling every iteration while only re-issuing to the driver on change. There is no closed-loop position control; the encoder (below) is a verification layer only, not a feedback input to motion.
+Motion itself is entirely open-loop: `FastAccelStepper` drives the stepper, generating step pulses in an ESP32 hardware peripheral (RMT/MCPWM), and `stepper->getCurrentPosition()` — a step count — is the sole authority on carriage position for control purposes. The state machine is **command-based**: it issues a velocity move (`runForward()`/`runBackward()`, for homing/jogging), a positioning move (`moveTo()`), or an immediate halt (`forceStop()`) only when the intent changes; hardware runs the move in the background and the loop polls `getCurrentPosition()`/`isRunning()`. A small command cache (`commandVelocity` / `commandMoveTo` / `commandHalt`) lets the flat `switch(mode)` keep calling every iteration while only re-issuing to the driver on change. This describes the **open-loop** mode (the default). A second, compile-time-selectable **closed-loop** mode feeds the encoder back into motion — see "Closed-loop position control" below.
 
-## Encoder integration (verification-only, not closed-loop)
+## Encoder integration (verification, and now closed-loop feedback)
 
-This was a deliberate scope decision: the AS5600 magnetic encoder was added purely to *detect* when the open-loop step count and the real physical position disagree (a skipped step, stall, or slipped belt) — not to replace the stepper's step count as the thing driving motion. There is currently no closed-loop control work in progress; if that's ever wanted, it would be a separate, larger change on top of this.
+The AS5600 magnetic encoder was originally added purely to *detect* when the open-loop step count and the real physical position disagree (a skipped step, stall, or slipped belt) — a verification layer, not a driver of motion. In open-loop mode that is still its only role. It is now *also* the feedback signal for the closed-loop mode described below; open-loop step-counting remains the default and is unchanged.
 
 `railEncoder` (a global `RailEncoder` instance, `src/Encoder.cpp` / `include/Encoder.h`) wraps the `robtillaart/AS5600` library so the state-machine file never touches `AS5600`/`Wire` directly. `railEncoder.update()` runs every `loop()` iteration but is internally throttled to a 10ms poll interval — see "Control loop timing" below for why. It's zeroed alongside the stepper's own zero point in `HomingPhase::SET_ZERO`, so the two positions are only meaningfully comparable from `HOMING_FINISHED` onward; the mismatch check is skipped entirely during `HOMING`.
 
 The mismatch check (in `loop()`, gated to `IDLE`/`JOGGING`) compares `stepper->getCurrentPosition()/STEPS_PER_MM` against `railEncoder.positionMm()`:
 - **`ENCODER_NOT_DETECTED`** fires immediately and always halts into `Mode::ERROR` if the encoder drops off I2C — including a failed `railEncoder.begin()` at boot.
 - **`POSITION_MISMATCH`** fires when the two diverge past `POSITION_MISMATCH_TOLERANCE_MM`, but only actually halts the system if `POSITION_MISMATCH_HALT_ENABLED` is `true`. A running `maxAbsPositionDiffMm` and a live `Would Mismatch` flag are always tracked/printed regardless of the halt toggle, so the mismatch condition can be observed without it stopping the rail.
+
+## Closed-loop position control
+
+A second control mode, layered on the verification encoder above, that uses the encoder as the actual feedback signal. It's selected at **compile time** by the `controlMode` global (`ControlMode::OPEN_LOOP` default / `ControlMode::CLOSED_LOOP`) near the top of `src/LR_MS2_BaseCode.cpp` — flip it and reflash; there is no runtime toggle. `controlModeText()` prints the active mode as the telemetry `ctrl=` field (`OL`/`CL`).
+
+**Open-loop is unchanged.** Every prior motion command is preserved verbatim in the `else` of an `if (controlMode == CLOSED_LOOP)`; closed-loop code executes only in the `CLOSED_LOOP` branch. Homing is always open-loop (the encoder isn't zeroed until `SET_ZERO`, and homing is a physical seek to a switch).
+
+**Setpoints.** Closed-loop servos the encoder onto the same targets the app already commands — the jog soft-limit endpoints (`JOG_MIN/MAX_POSITION_MM`) and the IDLE hold position; no new command interface was added. `clSetpointMm` holds the target. The endpoint branches set it in *both* modes so the telemetry is symmetric for open-vs-closed A/B logging, while the hold latch and all motion effects are closed-loop only.
+
+**Control law** (`closedLoopServoTo`). A proportional servo on encoder error, emitted as an adjusted `moveTo` through the existing `commandMoveTo` cache (it never touches `FastAccelStepper` directly):
+
+```
+errMm  = setpointMm - railEncoder.positionMm()      // drive the ENCODER to setpoint
+if |errMm| <= CL_DEADBAND_MM: hold last target       // no dither
+corrMm = clamp(CL_KP * errMm, +/- CL_MAX_CORRECTION_MM)
+commandMoveTo(getCurrentPosition() + mmToSteps(corrMm), speedHz)
+```
+
+The clamp keeps the re-planned target close to actual, so a long travel is a smooth cruise (the target sits a fixed distance ahead → constant velocity) that then collapses onto the setpoint and decelerates cleanly in; the deadband nulls hold dither. The servo self-throttles to `CL_UPDATE_INTERVAL_MS` (throttle *inside the callee*, matching the `RailEncoder::update()` / `printStatus()` pattern).
+
+**Stop-and-hold** (`closedLoopHold`). On the first entry to a stop (both jog buttons, jog release, or IDLE) it ramps to a natural stop exactly like the open-loop `commandVelocity(0)` — so the stopping feel is identical and the carriage doesn't snap back — and only once actually stopped latches that rest position as the hold setpoint, then servos to reject drift. `HomingPhase::SET_ZERO` resets `clSetpointMm`/`clInHold` so a re-home re-latches.
+
+`CL_KP`, `CL_DEADBAND_MM`, `CL_MAX_CORRECTION_MM`, `CL_UPDATE_INTERVAL_MS`, and `CL_CORRECTION_SPEED_HZ` (near the top of the file) are **live calibration constants**, like the `POSITION_MISMATCH_*` pair — tune against real hardware (hold dither → raise deadband / lower gain; travel ripple → lower gain / raise clamp/interval). Telemetry adds `sp=` (setpoint) and `cerr=` (setpoint − encoder = the live servo error).
+
+**Mismatch check interaction.** `POSITION_MISMATCH` compares step-count vs. encoder; in closed-loop that difference is exactly the quantity the servo nulls (control error), not a fault. It stays observe-only today (`POSITION_MISMATCH_HALT_ENABLED == false`), so there's no conflict — but if that halt is ever armed, gate it to open-loop only. `ENCODER_NOT_DETECTED` stays active in both modes (a dropped encoder is fatal to closed loop).
 
 ## Over-travel failsafe (hard position limits)
 

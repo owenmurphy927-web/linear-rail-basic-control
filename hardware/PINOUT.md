@@ -6,8 +6,8 @@ ESP32 dev board (`esp32dev`) driving a belt-and-pulley linear rail through a STE
 
 | Pin | Signal | Notes |
 |---|---|---|
-| 26 | `STEP_PIN` | Stepper driver STEP |
-| 27 | `DIR_PIN` | Stepper driver DIR |
+| 26 | `STEP_PIN` | Stepper driver STEP — step pulses generated in hardware by FastAccelStepper (ESP32 RMT/MCPWM), not bit-banged from `loop()`. |
+| 27 | `DIR_PIN` | Stepper driver DIR — direction sense set via `setDirectionPin(DIR_PIN, false)` (inverted; verify on bench). |
 | 23 | `HOMING_PIN` | Home limit switch (near-end limit) — wired NC, so HIGH = pressed, LOW = released. `INPUT_PULLUP`. Used for homing; also acts as the near-end over-travel limit outside homing. |
 | 13 | `FAR_LIMIT_PIN` | Far end-of-travel limit switch — wired NC, so HIGH = pressed. `INPUT_PULLUP`. Over-travel failsafe only (not used during homing). |
 | 32 | `MS1_PIN` | Microstep select 1 |

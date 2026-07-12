@@ -10,7 +10,7 @@
 
 `loop()` is one large `switch(mode)`, with a nested `switch(homingPhase)` inside `HOMING` and a nested `switch(errorMode)` inside `ERROR`.
 
-Motion itself is entirely open-loop: `AccelStepper` drives the stepper via `runSpeed()` (homing/jogging) or `run()` (the final approach to a `moveTo()` target), and `stepper.currentPosition()` — a step count — is the sole authority on carriage position for control purposes. There is no closed-loop position control; the encoder (below) is a verification layer only, not a feedback input to motion.
+Motion itself is entirely open-loop: `FastAccelStepper` drives the stepper, generating step pulses in an ESP32 hardware peripheral (RMT/MCPWM), and `stepper->getCurrentPosition()` — a step count — is the sole authority on carriage position for control purposes. The state machine is **command-based**: it issues a velocity move (`runForward()`/`runBackward()`, for homing/jogging), a positioning move (`moveTo()`), or an immediate halt (`forceStop()`) only when the intent changes; hardware runs the move in the background and the loop polls `getCurrentPosition()`/`isRunning()`. A small command cache (`commandVelocity` / `commandMoveTo` / `commandHalt`) lets the flat `switch(mode)` keep calling every iteration while only re-issuing to the driver on change. There is no closed-loop position control; the encoder (below) is a verification layer only, not a feedback input to motion.
 
 ## Encoder integration (verification-only, not closed-loop)
 
@@ -18,7 +18,7 @@ This was a deliberate scope decision: the AS5600 magnetic encoder was added pure
 
 `railEncoder` (a global `RailEncoder` instance, `src/Encoder.cpp` / `include/Encoder.h`) wraps the `robtillaart/AS5600` library so the state-machine file never touches `AS5600`/`Wire` directly. `railEncoder.update()` runs every `loop()` iteration but is internally throttled to a 10ms poll interval — see "Control loop timing" below for why. It's zeroed alongside the stepper's own zero point in `HomingPhase::SET_ZERO`, so the two positions are only meaningfully comparable from `HOMING_FINISHED` onward; the mismatch check is skipped entirely during `HOMING`.
 
-The mismatch check (in `loop()`, gated to `IDLE`/`JOGGING`) compares `stepper.currentPosition()/STEPS_PER_MM` against `railEncoder.positionMm()`:
+The mismatch check (in `loop()`, gated to `IDLE`/`JOGGING`) compares `stepper->getCurrentPosition()/STEPS_PER_MM` against `railEncoder.positionMm()`:
 - **`ENCODER_NOT_DETECTED`** fires immediately and always halts into `Mode::ERROR` if the encoder drops off I2C — including a failed `railEncoder.begin()` at boot.
 - **`POSITION_MISMATCH`** fires when the two diverge past `POSITION_MISMATCH_TOLERANCE_MM`, but only actually halts the system if `POSITION_MISMATCH_HALT_ENABLED` is `true`. A running `maxAbsPositionDiffMm` and a live `Would Mismatch` flag are always tracked/printed regardless of the halt toggle, so the mismatch condition can be observed without it stopping the rail.
 
@@ -38,7 +38,11 @@ During bring-up, jogging tripped `POSITION_MISMATCH` almost instantly regardless
 
 ## Control loop timing
 
-`loop()` has to serve two competing constraints every cycle: keep the stepper's step pulses timely (`AccelStepper.runSpeed()`/`run()` are called every iteration and are timing-sensitive — at `JOG_SPEED`, step pulses are only ~2.5ms apart at the values used during bring-up), and read the AS5600 over I2C, which is a blocking transaction that can stall for up to `Wire.setTimeOut(5)` = 5ms on a bad read. To avoid the encoder read starving step timing, `RailEncoder::update()` throttles itself internally to a 10ms poll interval — callers just call it unconditionally at the top of `loop()`, before `switch(mode)`, so it keeps tracking through every mode without needing per-call throttling logic at the call site. `printStatus()` telemetry is separately throttled to `PRINT_INTERVAL_MS = 250ms`, since `Serial.print` is comparatively slow and doesn't need to run every cycle.
+Step-pulse generation no longer competes with anything in `loop()`. Since the migration to `FastAccelStepper`, step pulses are produced by an ESP32 hardware peripheral (RMT/MCPWM), so their timing is **independent of `loop()` / `printStatus()` / encoder-read timing** — `loop()` does not call a motion-service function every iteration; it only issues a command when motion intent changes. This is what lets telemetry run at 10–20 Hz without the print-synced motion stutter the software-stepped `AccelStepper` version suffered (the earlier version toggled the STEP pin from `loop()`, so any contiguous CPU work — formatting a telemetry line, a blocking serial write — stretched a step interval).
+
+Two throttles remain, each for its own reason:
+- `RailEncoder::update()` is called unconditionally at the top of `loop()` but throttles itself internally to a 10ms poll interval, because the AS5600 read is a blocking I2C transaction (up to `Wire.setTimeOut(5)` = 5ms on a bad read) and there's no value polling it faster. Keep the throttle *inside* the callee, not as ad-hoc `millis()` checks in `loop()`.
+- `printStatus()` is throttled to `PRINT_INTERVAL_MS` (a live-tuned placeholder), since `Serial.print` is comparatively slow. `Serial.setTxBufferSize(1024)` in `setup()` (before `Serial.begin`) additionally gives the UART a background TX ring buffer, so `Serial.print` copies and returns instead of blocking and the UART's own ISR drains it. With hardware step generation this is no longer *required* for smooth motion, but it keeps the loop responsive at high print rates.
 
 ## Known pre-existing quirk
 

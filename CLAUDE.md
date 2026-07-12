@@ -1,0 +1,41 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project overview
+
+ESP32 (PlatformIO/Arduino) firmware for a fully 3D-printed, belt-driven linear rail. It's a platform for later controls demos, not a finished product. The rail homes against a limit switch, then supports manual jogging. An AS5600 magnetic encoder was recently integrated as an independent position-feedback verification signal (open-loop stepper counting is still what actually drives motion — see `docs/ARCHITECTURE.md`).
+
+Repo layout: `src/` + `include/` (firmware), `lib/` (empty, PlatformIO placeholder — no private libraries yet), `test/` (empty, PlatformIO placeholder — no automated tests), `hardware/` (pinout/mechanical reference), `docs/` (architecture and calibration history).
+
+## Build commands
+
+This is a PlatformIO project (`platformio.ini`, single environment `env:esp32dev`, `board = esp32dev`, `framework = arduino`). **There is currently only one build environment** — no separate bench-test vs. on-rail environment exists. If bench testing (e.g. without the limit switch or encoder wired) is ever needed as a distinct build, that would require a new `[env:...]` section plus conditional (`#ifdef`)-guarded behavior in the firmware itself, not just a config split — worth a deliberate decision before adding, not something to assume exists.
+
+`pio` is not necessarily on `PATH`. If `pio run` fails with "command not found", use the full path to the PlatformIO CLI installed under the user's penv, e.g. `~/.platformio/penv/Scripts/pio.exe` (Windows) — locate it with `ls ~/.platformio/penv/Scripts/` if unsure.
+
+- Build: `pio run`
+- Upload/flash: `pio run -t upload`
+- Serial monitor (115200 baud): `pio device monitor -b 115200`
+- Clean: `pio run -t clean`
+
+There is no unit test suite — `test/` only contains PlatformIO's placeholder `README`. Verification is done on hardware via the serial monitor's telemetry line (see `printStatus()` below), not automated tests.
+
+## Architecture
+
+Two source files, both under `src/` (PlatformIO auto-compiles everything in `src/*.cpp` and adds `include/` to the include path — no build-script wiring needed when adding files):
+
+- **`src/LR_MS2_BaseCode.cpp`** — the entire rail control state machine, single file.
+- **`src/Encoder.cpp`** / **`include/Encoder.h`** — `RailEncoder`, a thin wrapper around the `robtillaart/AS5600` library + `Wire`, kept deliberately isolated so the state machine file never touches `AS5600`/`Wire` directly.
+
+Full state-machine shape, the encoder's verification-only design decision, and its calibration history live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — read that before making non-trivial changes to `loop()` or the mismatch-detection logic. Pin assignments and mechanical constants (belt/pulley ratio, steps-per-mm, etc.) live in [`hardware/PINOUT.md`](hardware/PINOUT.md); the `const` declarations at the top of `LR_MS2_BaseCode.cpp` are the source of truth if the two ever disagree.
+
+### Control loop timing constraint
+
+`loop()` serves two competing constraints every cycle: `AccelStepper.runSpeed()`/`run()` must be called every iteration and are timing-sensitive (step pulses can be only a couple ms apart at jogging speed), while reading the AS5600 over I2C is a blocking transaction that can stall up to `Wire.setTimeOut(5)` = 5ms on a bad read. To keep the encoder read from starving step timing, `RailEncoder::update()` throttles itself internally to a 10ms poll interval — it's called unconditionally every `loop()` iteration and no external throttling is needed at the call site. `printStatus()` telemetry is separately throttled to `PRINT_INTERVAL_MS = 250ms` (`Serial.print` is comparatively slow). When touching timing-sensitive code, preserve this pattern — internal throttling inside the thing being called, not ad hoc `millis()` checks scattered through `loop()`.
+
+`POSITION_MISMATCH_TOLERANCE_MM` and `POSITION_MISMATCH_HALT_ENABLED` (declared near the top of `LR_MS2_BaseCode.cpp`) are **live calibration constants** currently being tuned against real hardware, not fixed forever — check their current values before assuming the mismatch halt is armed.
+
+### Known pre-existing quirk
+
+In `Mode::JOGGING`, the "both jog buttons pressed" safety branch is unreachable dead code (the single-button `if` above it already catches that case first). This predates the encoder work and hasn't been asked to be fixed — don't silently touch it.

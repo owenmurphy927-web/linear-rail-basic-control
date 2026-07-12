@@ -38,6 +38,6 @@ Two internal throttles remain, and should stay *inside the callee* (not ad-hoc `
 
 `POSITION_MISMATCH_TOLERANCE_MM` and `POSITION_MISMATCH_HALT_ENABLED` (declared near the top of `LR_MS2_BaseCode.cpp`) are **live calibration constants** currently being tuned against real hardware, not fixed forever — check their current values before assuming the mismatch halt is armed.
 
-### Known pre-existing quirk
+### Jog input handling
 
-In `Mode::JOGGING`, the "both jog buttons pressed" safety branch is unreachable dead code (the single-button `if` above it already catches that case first). This predates the encoder work and hasn't been asked to be fixed — don't silently touch it.
+In `Mode::JOGGING`, the "both jog buttons pressed" case is checked **first** and stops the carriage (`commandVelocity(0)`) — a deliberate safety stop. (It was formerly below the single-button checks and thus unreachable dead code; it has since been moved to the top of the if-chain.)

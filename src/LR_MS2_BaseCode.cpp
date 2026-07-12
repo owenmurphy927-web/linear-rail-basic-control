@@ -37,7 +37,7 @@ const bool POSITION_MISMATCH_HALT_ENABLED = false;  // DEBUG: false disables the
 const float HOMING_SPEED_SLOW = -100.0;
 const float HOMING_SPEED_FAST = -600.0;
 const float BACKOFF_SPEED = 200.0;
-const float JOG_SPEED = 600.0;
+const float JOG_SPEED = 1600.0;
 
 const unsigned long BACKOFF_DURATION_MS = 1000;
 const unsigned long HOME_LED_DURATION_MS = 1000;
@@ -74,6 +74,7 @@ enum class MotionCmd { NONE, VELOCITY, POSITION };
 MotionCmd lastCmd = MotionCmd::NONE;
 float lastVelSps = 0.0f;
 long  lastTarget = 0;
+uint32_t lastMoveSpeedHz = 0;
 
 void commandVelocity(float signedSps) {          // continuous move (jog / homing approach)
   if (!stepper) return;                          // stepper init failed -- no-op (see STEPPER_INIT_FAILED)
@@ -88,12 +89,13 @@ void commandVelocity(float signedSps) {          // continuous move (jog / homin
   if (signedSps > 0) stepper->runForward(); else stepper->runBackward();
 }
 
-void commandMoveTo(long targetSteps) {           // positioning move to an absolute step target
+void commandMoveTo(long targetSteps, uint32_t speedHz = MAX_SPEED_HZ) {  // positioning move at speedHz
   if (!stepper) return;
-  if (lastCmd == MotionCmd::POSITION && targetSteps == lastTarget) return;
+  if (lastCmd == MotionCmd::POSITION && targetSteps == lastTarget && speedHz == lastMoveSpeedHz) return;
   lastCmd = MotionCmd::POSITION;
   lastTarget = targetSteps;
-  stepper->setSpeedInHz(MAX_SPEED_HZ);
+  lastMoveSpeedHz = speedHz;
+  stepper->setSpeedInHz(speedHz);
   stepper->moveTo(targetSteps);
 }
 
@@ -549,22 +551,20 @@ void loop() {
       break;
 
     case Mode::JOGGING:
-        if (posJogPressed()) {
-          if (stepper->getCurrentPosition() >= mmToSteps(JOG_MAX_POSITION_MM)) {
-            commandVelocity(0);                  // hold at soft max, stay in JOGGING
-          } else {
-            commandVelocity(JOG_SPEED);
-          }
-        } else if (negJogPressed()) {
-          if (stepper->getCurrentPosition() <= mmToSteps(JOG_MIN_POSITION_MM)) {
-            commandVelocity(0);                  // hold at soft min, stay in JOGGING
-          } else {
-            commandVelocity(-JOG_SPEED);
-          }
-        } else if (posJogPressed() && negJogPressed()) { // unreachable dead code -- single-button ifs above catch it first (preserved, not fixed)
+        // Jog by moving TO the soft limit at JOG_SPEED rather than running at constant velocity and
+        // reacting once the limit is crossed. FastAccelStepper plans the deceleration to land exactly
+        // on the target, so the carriage decelerates INTO the soft limit and never overshoots into the
+        // switch -- at any jog speed. (The old velocity+reactive-stop overshot by v^2/(2a), which grew
+        // with jog speed until it reached the switch.) Held mid-travel it cruises at JOG_SPEED toward
+        // the limit; released mid-travel it ramps to a stop.
+        if (posJogPressed() && negJogPressed()) { 
           commandVelocity(0);
+        } else if (posJogPressed()) {
+          commandMoveTo(mmToSteps(JOG_MAX_POSITION_MM), (uint32_t)JOG_SPEED);
+        } else if (negJogPressed()) {
+          commandMoveTo(mmToSteps(JOG_MIN_POSITION_MM), (uint32_t)JOG_SPEED);
         } else {
-          commandVelocity(0);                    // stop and hold at release point
+          commandVelocity(0);                    // release -> ramp to a stop and hold, back to IDLE
           changeState(Mode::IDLE);
         }
         break;

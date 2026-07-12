@@ -44,6 +44,6 @@ Two throttles remain, each for its own reason:
 - `RailEncoder::update()` is called unconditionally at the top of `loop()` but throttles itself internally to a 10ms poll interval, because the AS5600 read is a blocking I2C transaction (up to `Wire.setTimeOut(5)` = 5ms on a bad read) and there's no value polling it faster. Keep the throttle *inside* the callee, not as ad-hoc `millis()` checks in `loop()`.
 - `printStatus()` is throttled to `PRINT_INTERVAL_MS` (a live-tuned placeholder), since `Serial.print` is comparatively slow. `Serial.setTxBufferSize(1024)` in `setup()` (before `Serial.begin`) additionally gives the UART a background TX ring buffer, so `Serial.print` copies and returns instead of blocking and the UART's own ISR drains it. With hardware step generation this is no longer *required* for smooth motion, but it keeps the loop responsive at high print rates.
 
-## Known pre-existing quirk
+## Jog input handling
 
-In `Mode::JOGGING`, the "both jog buttons pressed" safety branch is unreachable dead code — the single-button `if` above it already catches that case first. This predates the encoder work and hasn't been asked to be fixed.
+In `Mode::JOGGING`, the "both jog buttons pressed" case is checked **first** in the if-chain and stops the carriage (`commandVelocity(0)`), so pressing both buttons is a deliberate stop rather than a direction. (Previously this branch sat below the single-button checks and was unreachable dead code; it was moved to the top to make it a real safety stop.)

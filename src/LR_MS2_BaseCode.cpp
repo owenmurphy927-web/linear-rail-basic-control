@@ -236,7 +236,7 @@ enum class ErrorMode {
 // to CLOSED_LOOP once the toggleable closed-loop position mode lands -- printed as ctrl= so logs
 // record which controller was active.
 enum class ControlMode { OPEN_LOOP, CLOSED_LOOP };
-ControlMode controlMode = ControlMode::OPEN_LOOP;
+ControlMode controlMode = ControlMode::CLOSED_LOOP; //THIS IS MODE TOGGLE -- THIS IS MODE TOGGLE 
 
 // Manual declare function prototypes so Arduino IDE doesn't guess wrong -- from ChatGPT - weird way IDE defines functions
 void changeState(Mode nextState);
@@ -403,6 +403,8 @@ void idleLight(bool state) {
     // One snprintf + one Serial.println instead of ~40 Serial.print calls: fits on a single terminal
     // line, and fewer trips through the TX path. Format is self-describing key=value so logs stay
     // parseable as fields are added later. %f is safe here -- ESP32/newlib has full printf float support.
+    // This format string is the source of truth for the field legend in docs/TELEMETRY.md -- update
+    // that table when you add, rename, or reorder a field here.
     float posMm  = stepper ? stepper->getCurrentPosition() / STEPS_PER_MM : 0.0f;
     float velSps = stepper ? stepper->getCurrentSpeedInMilliHz() / 1000.0f : 0.0f;
     float velMms = velSps / STEPS_PER_MM;

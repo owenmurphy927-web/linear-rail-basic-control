@@ -19,7 +19,7 @@ This is a PlatformIO project (`platformio.ini`, single environment `env:esp32dev
 - Serial monitor (115200 baud): `pio device monitor -b 115200`
 - Clean: `pio run -t clean`
 
-There is no unit test suite — `test/` only contains PlatformIO's placeholder `README`. Verification is done on hardware via the serial monitor's telemetry line (see `printStatus()` below), not automated tests.
+There is no unit test suite — `test/` only contains PlatformIO's placeholder `README`. Verification is done on hardware via the serial monitor's telemetry line (see `printStatus()` below; every field is decoded in [`docs/TELEMETRY.md`](docs/TELEMETRY.md)), not automated tests.
 
 ## Architecture
 

@@ -75,17 +75,20 @@ const int HOME_LED_PIN = 19;  //BLUE
 // runtime-mutable via setMotionSpeed()/setMotionAccel() (defined below, near the command helpers) so
 // test code can sweep them -- e.g. the acceleration ramp in docs/TESTING_PLAN.md -- without touching
 // setup() or the state machine. Boot defaults match the previous MAX_SPEED_HZ / ACCEL_STEPS_PER_S2.
-uint32_t motionSpeedHz         = 1600;   // positioning-move cruise speed (per moveTo), steps/s
-uint32_t motionAccelStepsPerS2 = 8000;   // ramp acceleration, steps/s^2
-const float JOG_SPEED          = 4800.0; // manual jog velocity, steps/s
+uint32_t motionSpeedHz         = 6000;   // positioning-move cruise speed (per moveTo), steps/s
+uint32_t motionAccelStepsPerS2 = 10000;   // ramp acceleration, steps/s^2
+const float JOG_SPEED          = motionSpeedHz; // manual jog velocity, steps/s
 
 // ---- Closed-loop position control (encoder feedback) ----
 // Active ONLY when controlMode == CLOSED_LOOP (see below); the OPEN_LOOP path is unchanged.
 // Proportional servo that drives the ENCODER (not the step count) onto the commanded
 // setpoint. All LIVE-TUNED against real hardware, like POSITION_MISMATCH_TOLERANCE_MM.
-const float    CL_KP                  = 0.6f;         // proportional gain: mm of target-adjust per mm of encoder error
+const float    CL_KP                  = 0.8f;         // proportional gain: mm of target-adjust per mm of encoder error
 const float    CL_DEADBAND_MM         = 0.10f;        // no correction while |setpoint - encoder| <= this (kills hold dither)
-const float    CL_MAX_CORRECTION_MM   = 8.0f;         // clamp per-tick target adjustment (keeps target near actual -> no ripple)
+const float    CL_MAX_CORRECTION_MM   = 8.0f;         // HOLD clamp: per-tick target adjustment while holding (keeps target near actual -> no dither/ripple)
+const float    CL_TRAVEL_MAX_CORRECTION_MM = 120.0f;  // TRAVEL clamp: large enough to never bind on this ~111mm rail, so the
+                                                      // travel lookahead is CL_KP*err (not a fixed 8mm) and the jog reaches JOG_SPEED.
+                                                      // A tight travel clamp caps cruise at sqrt(2*accel*clamp) -- far below JOG_SPEED.
 const unsigned long CL_UPDATE_INTERVAL_MS = 20;       // servo tick throttle (>= encoder 10ms poll)
 const uint32_t CL_CORRECTION_SPEED_HZ = motionSpeedHz; // speed cap for hold-correction moves (snapshot at init; not updated by setMotionSpeed())
 
@@ -194,9 +197,13 @@ bool  clInHold = false;
 // the state machine. Drives the ENCODER onto setpointMm by nudging the stepper's moveTo
 // target (reuses the command cache via commandMoveTo -- never touches FastAccelStepper
 // directly). Self-throttled to CL_UPDATE_INTERVAL_MS; between ticks the last commanded
-// target simply holds. Deadband suppresses hold dither; the per-tick clamp keeps the
-// target close to actual so travel stays a smooth cruise (no velocity ripple).
-void closedLoopServoTo(float setpointMm, uint32_t speedHz) {
+// target simply holds. Deadband suppresses hold dither. maxCorrectionMm clamps the per-tick
+// target adjustment: callers pass the tight CL_MAX_CORRECTION_MM for HOLD (target stays near
+// actual -> no dither/ripple) and the large CL_TRAVEL_MAX_CORRECTION_MM for jog TRAVEL (clamp
+// non-binding -> lookahead is CL_KP*err, so the move reaches JOG_SPEED then decelerates
+// cleanly into the endpoint as err shrinks). A tight clamp on travel would cap cruise at
+// sqrt(2*accel*clamp), far below JOG_SPEED.
+void closedLoopServoTo(float setpointMm, uint32_t speedHz, float maxCorrectionMm) {
   if (!stepper) return;
   static unsigned long lastTick = 0;
   if (millis() - lastTick < CL_UPDATE_INTERVAL_MS) return;
@@ -206,8 +213,8 @@ void closedLoopServoTo(float setpointMm, uint32_t speedHz) {
   if (fabsf(errMm) <= CL_DEADBAND_MM) return;             // in band: hold last target
 
   float corrMm = CL_KP * errMm;
-  if (corrMm >  CL_MAX_CORRECTION_MM) corrMm =  CL_MAX_CORRECTION_MM;
-  if (corrMm < -CL_MAX_CORRECTION_MM) corrMm = -CL_MAX_CORRECTION_MM;
+  if (corrMm >  maxCorrectionMm) corrMm =  maxCorrectionMm;
+  if (corrMm < -maxCorrectionMm) corrMm = -maxCorrectionMm;
 
   commandMoveTo(stepper->getCurrentPosition() + mmToSteps(corrMm), speedHz);
 }
@@ -226,7 +233,7 @@ void closedLoopHold() {
     clSetpointMm = railEncoder.positionMm();     // hold where it came to rest
     clInHold = true;
   }
-  closedLoopServoTo(clSetpointMm, CL_CORRECTION_SPEED_HZ);
+  closedLoopServoTo(clSetpointMm, CL_CORRECTION_SPEED_HZ, CL_MAX_CORRECTION_MM);  // HOLD: tight clamp
 }
 
 enum class Mode {
@@ -260,7 +267,7 @@ enum class ErrorMode {
 // to CLOSED_LOOP once the toggleable closed-loop position mode lands -- printed as ctrl= so logs
 // record which controller was active.
 enum class ControlMode { OPEN_LOOP, CLOSED_LOOP };
-ControlMode controlMode = ControlMode::CLOSED_LOOP; //THIS IS MODE TOGGLE -- THIS IS MODE TOGGLE 
+ControlMode controlMode = ControlMode::OPEN_LOOP; //THIS IS MODE TOGGLE -- THIS IS MODE TOGGLE 
 
 // Manual declare function prototypes so Arduino IDE doesn't guess wrong -- from ChatGPT - weird way IDE defines functions
 void changeState(Mode nextState);
@@ -641,14 +648,14 @@ void loop() {
         } else if (posJogPressed()) {
           clInHold = false; clSetpointMm = JOG_MAX_POSITION_MM;
           if (controlMode == ControlMode::CLOSED_LOOP) {
-            closedLoopServoTo(clSetpointMm, (uint32_t)JOG_SPEED);
+            closedLoopServoTo(clSetpointMm, (uint32_t)JOG_SPEED, CL_TRAVEL_MAX_CORRECTION_MM);  // TRAVEL: large clamp
           } else {
             commandMoveTo(mmToSteps(JOG_MAX_POSITION_MM), (uint32_t)JOG_SPEED);
           }
         } else if (negJogPressed()) {
           clInHold = false; clSetpointMm = JOG_MIN_POSITION_MM;
           if (controlMode == ControlMode::CLOSED_LOOP) {
-            closedLoopServoTo(clSetpointMm, (uint32_t)JOG_SPEED);
+            closedLoopServoTo(clSetpointMm, (uint32_t)JOG_SPEED, CL_TRAVEL_MAX_CORRECTION_MM);  // TRAVEL: large clamp
           } else {
             commandMoveTo(mmToSteps(JOG_MIN_POSITION_MM), (uint32_t)JOG_SPEED);
           }

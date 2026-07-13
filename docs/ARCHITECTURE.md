@@ -35,15 +35,20 @@ A second control mode, layered on the verification encoder above, that uses the 
 ```
 errMm  = setpointMm - railEncoder.positionMm()      // drive the ENCODER to setpoint
 if |errMm| <= CL_DEADBAND_MM: hold last target       // no dither
-corrMm = clamp(CL_KP * errMm, +/- CL_MAX_CORRECTION_MM)
+corrMm = clamp(CL_KP * errMm, +/- maxCorrectionMm)   // clamp is caller-supplied (travel vs hold)
 commandMoveTo(getCurrentPosition() + mmToSteps(corrMm), speedHz)
 ```
 
-The clamp keeps the re-planned target close to actual, so a long travel is a smooth cruise (the target sits a fixed distance ahead → constant velocity) that then collapses onto the setpoint and decelerates cleanly in; the deadband nulls hold dither. The servo self-throttles to `CL_UPDATE_INTERVAL_MS` (throttle *inside the callee*, matching the `RailEncoder::update()` / `printStatus()` pattern).
+The per-tick correction clamp (`maxCorrectionMm`) is **passed by the caller**, and its value is what separates the two regimes:
+
+- **Hold** (`closedLoopHold`) passes the tight `CL_MAX_CORRECTION_MM` (8mm): the re-planned target stays close to actual, so drift nulling is small and dither-free.
+- **Jog travel** (the jog branches) passes the large `CL_TRAVEL_MAX_CORRECTION_MM` (~120mm, non-binding on the ~111mm rail): the clamp never binds, so the lookahead is `CL_KP · errMm` and shrinks as the carriage approaches the setpoint — the move accelerates up to `JOG_SPEED`, cruises, then decelerates cleanly onto the endpoint.
+
+This split exists because a *tight* clamp on travel forces the target to sit only a fixed distance ahead, and FastAccelStepper always plans to stop at that target — so the sustainable cruise is capped at `sqrt(2·accel·clamp_steps)`, far below `JOG_SPEED` and dependent only on acceleration (not the commanded speed). The tight clamp is right for hold and was strangling travel. The deadband nulls hold dither. The servo self-throttles to `CL_UPDATE_INTERVAL_MS` (throttle *inside the callee*, matching the `RailEncoder::update()` / `printStatus()` pattern).
 
 **Stop-and-hold** (`closedLoopHold`). On the first entry to a stop (both jog buttons, jog release, or IDLE) it ramps to a natural stop exactly like the open-loop `commandVelocity(0)` — so the stopping feel is identical and the carriage doesn't snap back — and only once actually stopped latches that rest position as the hold setpoint, then servos to reject drift. `HomingPhase::SET_ZERO` resets `clSetpointMm`/`clInHold` so a re-home re-latches.
 
-`CL_KP`, `CL_DEADBAND_MM`, `CL_MAX_CORRECTION_MM`, `CL_UPDATE_INTERVAL_MS`, and `CL_CORRECTION_SPEED_HZ` (near the top of the file) are **live calibration constants**, like the `POSITION_MISMATCH_*` pair — tune against real hardware (hold dither → raise deadband / lower gain; travel ripple → lower gain / raise clamp/interval). Telemetry adds the `sp` (setpoint) and `cerr` (setpoint − encoder = the live servo error) fields — every telemetry field is decoded in [`TELEMETRY.md`](TELEMETRY.md).
+`CL_KP`, `CL_DEADBAND_MM`, `CL_MAX_CORRECTION_MM`, `CL_TRAVEL_MAX_CORRECTION_MM`, `CL_UPDATE_INTERVAL_MS`, and `CL_CORRECTION_SPEED_HZ` (near the top of the file) are **live calibration constants**, like the `POSITION_MISMATCH_*` pair — tune against real hardware (hold dither → raise deadband / lower `CL_MAX_CORRECTION_MM` / lower gain; travel ripple → lower gain / raise interval; jog too slow → the travel cap is `sqrt(2·accel·CL_TRAVEL_MAX_CORRECTION_MM_steps)` gated by `CL_KP·err` and `JOG_SPEED`, so raise `CL_TRAVEL_MAX_CORRECTION_MM` and/or a travel gain toward 1.0). Telemetry adds the `sp` (setpoint) and `cerr` (setpoint − encoder = the live servo error) fields — every telemetry field is decoded in [`TELEMETRY.md`](TELEMETRY.md).
 
 **Mismatch check interaction.** `POSITION_MISMATCH` compares step-count vs. encoder; in closed-loop that difference is exactly the quantity the servo nulls (control error), not a fault. It stays observe-only today (`POSITION_MISMATCH_HALT_ENABLED == false`), so there's no conflict — but if that halt is ever armed, gate it to open-loop only. `ENCODER_NOT_DETECTED` stays active in both modes (a dropped encoder is fatal to closed loop).
 

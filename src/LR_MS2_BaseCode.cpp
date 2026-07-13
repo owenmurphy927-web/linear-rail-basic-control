@@ -20,7 +20,20 @@ const int ENCODER_SDA_PIN = 21;
 const int ENCODER_SCL_PIN = 22;
 
 
-const long REV_STEPS = 800;  // 1/4 step mode
+// Microstep configuration -- single source of truth. Selecting ACTIVE_MICROSTEP sets BOTH the
+// MS1/MS2 driver pins (applied in setup() via microStep()) AND steps-per-rev, so the two can never
+// drift out of sync (previously REV_STEPS and the microStep() call were set independently). The
+// pin<->resolution map is the empirically-measured bench table in hardware/MICROSTEPPING.md. A
+// constexpr struct (not an enum) keeps this a plain compile-time config.
+struct MicrostepMode { bool ms1; bool ms2; long stepsPerRev; };
+constexpr MicrostepMode MS_HALF      {true,  false, 400 };   // 1/2  step
+constexpr MicrostepMode MS_QUARTER   {false, true,  800 };   // 1/4  step
+constexpr MicrostepMode MS_EIGHTH    {false, false, 1600};   // 1/8  step
+constexpr MicrostepMode MS_SIXTEENTH {true,  true,  3200};   // 1/16 step
+
+constexpr MicrostepMode ACTIVE_MICROSTEP = MS_QUARTER;       // <-- change this to reconfigure microstepping
+const long REV_STEPS = ACTIVE_MICROSTEP.stepsPerRev;         // steps per motor revolution (derived)
+
 const int PULLEY_TEETH = 16;
 const float BELT_PITCH_MM = 2.0;
 const float MM_PER_REV = PULLEY_TEETH * BELT_PITCH_MM;
@@ -31,13 +44,11 @@ const float STEPS_PER_MM = REV_STEPS / MM_PER_REV;
 const float POSITION_MISMATCH_TOLERANCE_MM = 0.5;  // starting point -- tune after watching normal-run "Pos Diff mm"
 const bool POSITION_MISMATCH_HALT_ENABLED = false;  // DEBUG: false disables the hard-stop so mismatch can be observed live. Set true once direction/scale calibration is confirmed.
 
-// Signed speeds.
-// Negative = toward home switch.
-// Positive = away from home switch.
+// Homing / back-off signed speeds (safety- and homing-specific; NOT part of the swept test params).
+// Negative = toward home switch. Positive = away from home switch.
 const float HOMING_SPEED_SLOW = -100.0;
 const float HOMING_SPEED_FAST = -600.0;
 const float BACKOFF_SPEED = 200.0;
-const float JOG_SPEED = 2400.0;
 
 const unsigned long BACKOFF_DURATION_MS = 1000;
 const unsigned long HOME_LED_DURATION_MS = 1000;
@@ -58,9 +69,15 @@ const int ERROR_LED_PIN1 = 17; //
 const int IDLE_LED_PIN = 18;  //GREEN
 const int HOME_LED_PIN = 19;  //BLUE
 
-// Motion tuning. MAX_SPEED_HZ is applied per positioning move; ACCEL is set once in setup().
-const uint32_t MAX_SPEED_HZ = 1600;
-const uint32_t ACCEL_STEPS_PER_S2 = 8000;
+// ---- MOTION TUNING (consolidated) ----
+// One place to tune the speed/acceleration of positioning moves, kept independent of the control
+// mode (open- vs closed-loop) so OL/CL test runs share identical motion params. Speed and accel are
+// runtime-mutable via setMotionSpeed()/setMotionAccel() (defined below, near the command helpers) so
+// test code can sweep them -- e.g. the acceleration ramp in docs/TESTING_PLAN.md -- without touching
+// setup() or the state machine. Boot defaults match the previous MAX_SPEED_HZ / ACCEL_STEPS_PER_S2.
+uint32_t motionSpeedHz         = 1600;   // positioning-move cruise speed (per moveTo), steps/s
+uint32_t motionAccelStepsPerS2 = 8000;   // ramp acceleration, steps/s^2
+const float JOG_SPEED          = 2400.0; // manual jog velocity, steps/s
 
 // ---- Closed-loop position control (encoder feedback) ----
 // Active ONLY when controlMode == CLOSED_LOOP (see below); the OPEN_LOOP path is unchanged.
@@ -70,7 +87,7 @@ const float    CL_KP                  = 0.6f;         // proportional gain: mm o
 const float    CL_DEADBAND_MM         = 0.10f;        // no correction while |setpoint - encoder| <= this (kills hold dither)
 const float    CL_MAX_CORRECTION_MM   = 8.0f;         // clamp per-tick target adjustment (keeps target near actual -> no ripple)
 const unsigned long CL_UPDATE_INTERVAL_MS = 20;       // servo tick throttle (>= encoder 10ms poll)
-const uint32_t CL_CORRECTION_SPEED_HZ = MAX_SPEED_HZ; // speed cap for hold-correction moves
+const uint32_t CL_CORRECTION_SPEED_HZ = motionSpeedHz; // speed cap for hold-correction moves (snapshot at init; not updated by setMotionSpeed())
 
 // FastAccelStepper generates step pulses in hardware (ESP32 RMT/MCPWM), so pulse timing is
 // independent of loop()/printStatus() timing -- loop() no longer services motion every iteration.
@@ -99,7 +116,7 @@ void commandVelocity(float signedSps) {          // continuous move (jog / homin
   if (signedSps > 0) stepper->runForward(); else stepper->runBackward();
 }
 
-void commandMoveTo(long targetSteps, uint32_t speedHz = MAX_SPEED_HZ) {  // positioning move at speedHz
+void commandMoveTo(long targetSteps, uint32_t speedHz = motionSpeedHz) {  // positioning move at speedHz
   if (!stepper) return;
   if (lastCmd == MotionCmd::POSITION && targetSteps == lastTarget && speedHz == lastMoveSpeedHz) return;
   lastCmd = MotionCmd::POSITION;
@@ -114,6 +131,13 @@ void commandHalt() {                             // immediate stop (errors / ove
   lastCmd = MotionCmd::NONE;                     // force the next command to re-issue
   stepper->forceStop();
 }
+
+// Runtime motion-tuning knobs for the MOTION TUNING block above. Plain free functions -- they don't
+// touch loop()/the state machine. setMotionAccel pushes straight to the stepper so a tuning sweep
+// (e.g. the acceleration ramp in docs/TESTING_PLAN.md) takes effect on the next move; setMotionSpeed
+// is picked up by commandMoveTo's default speed argument.
+void setMotionSpeed(uint32_t hz)         { motionSpeedHz = hz; }
+void setMotionAccel(uint32_t stepsPerS2) { motionAccelStepsPerS2 = stepsPerS2; if (stepper) stepper->setAcceleration(stepsPerS2); }
 
 bool homeButtonPressed() {
   return digitalRead(HOMING_PIN) == HIGH;  // HIGH is pressed - now an NC switch, so HIGH when pressed, LOW when released
@@ -391,6 +415,12 @@ void idleLight(bool state) {
 //CGPT ADDITION - FOR PRINTING ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 //CGPT ADDITION - FOR PRINTING................................................
+  // Telemetry CSV column header, printed once at boot from setup(). Kept adjacent to printStatus() so
+  // the column names and the snprintf field order below stay together -- update BOTH (and
+  // docs/TELEMETRY.md) if you add, rename, or reorder a field.
+  static const char* TELEMETRY_CSV_HEADER =
+    "# t,ctrl,mode,phase,err,pos,vsps,vmms,enc,dpos,dmax,sp,cerr,mis,econn,eerr,lim,led";
+
   void printStatus() {
     static unsigned long lastPrintTime = 0;
 
@@ -401,10 +431,11 @@ void idleLight(bool state) {
     lastPrintTime = millis();
 
     // One snprintf + one Serial.println instead of ~40 Serial.print calls: fits on a single terminal
-    // line, and fewer trips through the TX path. Format is self-describing key=value so logs stay
-    // parseable as fields are added later. %f is safe here -- ESP32/newlib has full printf float support.
-    // This format string is the source of truth for the field legend in docs/TELEMETRY.md -- update
-    // that table when you add, rename, or reorder a field here.
+    // line, and fewer trips through the TX path. Condensed to values-only CSV (no key= prefixes) to
+    // minimize print cost for logging; field 1 is a millis() timestamp. The column legend is printed
+    // once at boot (TELEMETRY_CSV_HEADER above) and in docs/TELEMETRY.md -- keep all three in lockstep.
+    // Packed flag columns: lim = <near><far> (2 digits), led = <home><idle><err> (3 digits).
+    // %f is safe here -- ESP32/newlib has full printf float support.
     float posMm  = stepper ? stepper->getCurrentPosition() / STEPS_PER_MM : 0.0f;
     float velSps = stepper ? stepper->getCurrentSpeedInMilliHz() / 1000.0f : 0.0f;
     float velMms = velSps / STEPS_PER_MM;
@@ -412,10 +443,11 @@ void idleLight(bool state) {
 
     char buf[256];
     snprintf(buf, sizeof(buf),
-      "ctrl=%s mode=%s phase=%s err=%s "
-      "pos=%.2f vsps=%.1f vmms=%.2f enc=%.2f dpos=%.3f dmax=%.3f "
-      "sp=%.2f cerr=%.3f "
-      "mis=%d econn=%d eerr=%d lim=%d%d led=%d%d%d",
+      "%lu,%s,%s,%s,%s,"
+      "%.2f,%.1f,%.2f,%.2f,%.3f,%.3f,"
+      "%.2f,%.3f,"
+      "%d,%d,%d,%d%d,%d%d%d",
+      millis(),
       controlModeText(controlMode), modeText(mode),
       (mode == Mode::HOMING) ? homingPhaseText(homingPhase) : "-",
       (mode == Mode::ERROR)  ? errorModeText(errorMode)     : "-",
@@ -438,6 +470,7 @@ void setup() {
   delay(1000); // Delay homing routine for monitoring and upload stability
   Serial.setTxBufferSize(1024);  // background TX ring buffer so Serial.print never blocks loop() (starves step timing otherwise)
   Serial.begin(115200);
+  Serial.println(TELEMETRY_CSV_HEADER);  // one-time CSV column header for the telemetry stream (see printStatus())
 
   pinMode(HOMING_PIN, INPUT_PULLUP);
   pinMode(FAR_LIMIT_PIN, INPUT_PULLUP);
@@ -453,7 +486,7 @@ void setup() {
   homeLight(false);
 
 
-  microStep(LOW, HIGH);
+  microStep(ACTIVE_MICROSTEP.ms1, ACTIVE_MICROSTEP.ms2);  // pins derived from the single microstep config
 
   engine.init();
   stepper = engine.stepperConnectToPin(STEP_PIN);
@@ -467,7 +500,7 @@ void setup() {
   // if the carriage drives away from home, flip this boolean (see docs/ARCHITECTURE.md calibration).
   stepper->setDirectionPin(DIR_PIN, false);
   stepper->setAutoEnable(false);                   // no enable pin wired
-  stepper->setAcceleration(ACCEL_STEPS_PER_S2);
+  setMotionAccel(motionAccelStepsPerS2);           // apply consolidated accel tunable to the stepper
 
   bool encoderOk = railEncoder.begin(ENCODER_SDA_PIN, ENCODER_SCL_PIN, MM_PER_REV, AS5600_COUNTERCLOCK_WISE);
 

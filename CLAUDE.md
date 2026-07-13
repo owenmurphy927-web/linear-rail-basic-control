@@ -40,12 +40,12 @@ Two internal throttles remain, and should stay *inside the callee* (not ad-hoc `
 
 ### Control modes (open- vs. closed-loop)
 
-Motion runs in one of two control modes, selected at **compile time** by the `controlMode` global (`ControlMode::OPEN_LOOP` default / `ControlMode::CLOSED_LOOP`) near the top of `LR_MS2_BaseCode.cpp` — flip it and reflash; there is **no runtime toggle**. The telemetry line's `ctrl=` field (`OL`/`CL`) records which was active.
+Motion runs in one of two control modes, selected at **compile time** by the `controlMode` global (`ControlMode::OPEN_LOOP` default / `ControlMode::CLOSED_LOOP`) near the top of `LR_MS2_BaseCode.cpp` — flip it and reflash; there is **no runtime toggle**. The telemetry line's `ctrl` field (`OL`/`CL`) records which was active.
 
 - **Open-loop** (default): the stepper step count drives and holds position; the encoder is verification only. This is the original behavior and is unchanged.
 - **Closed-loop**: a proportional servo (`closedLoopServoTo`, plus `closedLoopHold` for stop-and-hold) drives the **encoder** onto the commanded setpoint — the jog soft-limit endpoints and the IDLE hold position. Homing is always open-loop. Closed-loop code runs only in the `controlMode == CLOSED_LOOP` branches; every open-loop statement is preserved verbatim in the `else`, so switching modes cannot alter open-loop behavior.
 
-The servo gains/limits (`CL_KP`, `CL_DEADBAND_MM`, `CL_MAX_CORRECTION_MM`, `CL_UPDATE_INTERVAL_MS`, `CL_CORRECTION_SPEED_HZ`) are **live calibration constants** tuned against real hardware, like the `POSITION_MISMATCH_*` pair. Telemetry adds `sp=` (setpoint) and `cerr=` (setpoint − encoder = live servo error), populated in both modes so open- vs. closed-loop test runs log the same target.
+The servo gains/limits (`CL_KP`, `CL_DEADBAND_MM`, `CL_MAX_CORRECTION_MM`, `CL_UPDATE_INTERVAL_MS`, `CL_CORRECTION_SPEED_HZ`) are **live calibration constants** tuned against real hardware, like the `POSITION_MISMATCH_*` pair. Telemetry adds the `sp` (setpoint) and `cerr` (setpoint − encoder = live servo error) fields, populated in both modes so open- vs. closed-loop test runs log the same target.
 
 The `POSITION_MISMATCH` check compares step-count vs. encoder — in closed-loop that difference is the quantity the servo actively nulls (control error), not a fault. It's observe-only today (`POSITION_MISMATCH_HALT_ENABLED == false`); if ever armed, gate it to open-loop only.
 

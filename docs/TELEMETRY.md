@@ -1,14 +1,24 @@
 # Serial telemetry format
 
-`printStatus()` (in `src/LR_MS2_BaseCode.cpp`) prints one self-describing `key=value`
-line over the serial monitor (115200 baud), throttled to `PRINT_INTERVAL_MS`. This file
-is the legend for those fields. **The `snprintf` format string in `printStatus()` is the
-source of truth** — if you add/rename/reorder a field there, update this table too.
+`printStatus()` (in `src/LR_MS2_BaseCode.cpp`) prints one condensed **CSV** line over the
+serial monitor (115200 baud), throttled to `PRINT_INTERVAL_MS`. Values only — no `key=`
+prefixes — to minimize print cost for logging; the first field is a `millis()` timestamp.
+A one-time `#`-prefixed **header row** is printed once at boot (from `setup()`) naming the
+columns, so MATLAB and other log parsers can map fields and skip the header. This file is
+the legend for those columns. **The `snprintf` format string in `printStatus()` is the
+source of truth** — if you add/rename/reorder a field there, update this table *and* the
+boot header string to match.
 
-Example line (illustrative values):
+Boot header (printed once):
 
 ```
-ctrl=OL mode=JOGGING phase=- err=- pos=45.32 vsps=1600.0 vmms=64.00 enc=45.28 dpos=0.040 dmax=0.112 sp=111.30 cerr=66.02 mis=0 econn=1 eerr=0 lim=00 led=010
+# t,ctrl,mode,phase,err,pos,vsps,vmms,enc,dpos,dmax,sp,cerr,mis,econn,eerr,lim,led
+```
+
+Example data line (illustrative values):
+
+```
+10432,OL,JOGGING,-,-,45.32,1600.0,64.00,45.28,0.040,0.112,111.30,66.02,0,1,0,00,010
 ```
 
 ## Sign / frame conventions
@@ -22,6 +32,7 @@ ctrl=OL mode=JOGGING phase=- err=- pos=45.32 vsps=1600.0 vmms=64.00 enc=45.28 dp
 
 | Field | Type / unit | Meaning |
 |---|---|---|
+| `t`     | ms | **Timestamp** — `millis()` since boot (monotonic; wraps after ~49 days). Field 1; the time base for MATLAB plots. |
 | `ctrl`  | `OL` \| `CL` | Active control mode — Open-Loop (step count drives motion) or Closed-Loop (encoder feedback drives motion). Set by the `controlMode` compile-time global. |
 | `mode`  | enum | Top-level state machine mode. See decode below. |
 | `phase` | enum \| `-` | Homing sub-phase; `-` unless `mode=HOMING`. See decode below. |

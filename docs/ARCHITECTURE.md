@@ -24,7 +24,7 @@ The mismatch check (in `loop()`, gated to `IDLE`/`JOGGING`) compares `stepper->g
 
 ## Closed-loop position control
 
-A second control mode, layered on the verification encoder above, that uses the encoder as the actual feedback signal. It's selected at **compile time** by the `controlMode` global (`ControlMode::OPEN_LOOP` default / `ControlMode::CLOSED_LOOP`) near the top of `src/LR_MS2_BaseCode.cpp` — flip it and reflash; there is no runtime toggle. `controlModeText()` prints the active mode as the telemetry `ctrl=` field (`OL`/`CL`).
+A second control mode, layered on the verification encoder above, that uses the encoder as the actual feedback signal. It's selected at **compile time** by the `controlMode` global (`ControlMode::OPEN_LOOP` default / `ControlMode::CLOSED_LOOP`) near the top of `src/LR_MS2_BaseCode.cpp` — flip it and reflash; there is no runtime toggle. `controlModeText()` prints the active mode as the telemetry `ctrl` field (`OL`/`CL`).
 
 **Open-loop is unchanged.** Every prior motion command is preserved verbatim in the `else` of an `if (controlMode == CLOSED_LOOP)`; closed-loop code executes only in the `CLOSED_LOOP` branch. Homing is always open-loop (the encoder isn't zeroed until `SET_ZERO`, and homing is a physical seek to a switch).
 
@@ -43,7 +43,7 @@ The clamp keeps the re-planned target close to actual, so a long travel is a smo
 
 **Stop-and-hold** (`closedLoopHold`). On the first entry to a stop (both jog buttons, jog release, or IDLE) it ramps to a natural stop exactly like the open-loop `commandVelocity(0)` — so the stopping feel is identical and the carriage doesn't snap back — and only once actually stopped latches that rest position as the hold setpoint, then servos to reject drift. `HomingPhase::SET_ZERO` resets `clSetpointMm`/`clInHold` so a re-home re-latches.
 
-`CL_KP`, `CL_DEADBAND_MM`, `CL_MAX_CORRECTION_MM`, `CL_UPDATE_INTERVAL_MS`, and `CL_CORRECTION_SPEED_HZ` (near the top of the file) are **live calibration constants**, like the `POSITION_MISMATCH_*` pair — tune against real hardware (hold dither → raise deadband / lower gain; travel ripple → lower gain / raise clamp/interval). Telemetry adds `sp=` (setpoint) and `cerr=` (setpoint − encoder = the live servo error) — every telemetry field is decoded in [`TELEMETRY.md`](TELEMETRY.md).
+`CL_KP`, `CL_DEADBAND_MM`, `CL_MAX_CORRECTION_MM`, `CL_UPDATE_INTERVAL_MS`, and `CL_CORRECTION_SPEED_HZ` (near the top of the file) are **live calibration constants**, like the `POSITION_MISMATCH_*` pair — tune against real hardware (hold dither → raise deadband / lower gain; travel ripple → lower gain / raise clamp/interval). Telemetry adds the `sp` (setpoint) and `cerr` (setpoint − encoder = the live servo error) fields — every telemetry field is decoded in [`TELEMETRY.md`](TELEMETRY.md).
 
 **Mismatch check interaction.** `POSITION_MISMATCH` compares step-count vs. encoder; in closed-loop that difference is exactly the quantity the servo nulls (control error), not a fault. It stays observe-only today (`POSITION_MISMATCH_HALT_ENABLED == false`), so there's no conflict — but if that halt is ever armed, gate it to open-loop only. `ENCODER_NOT_DETECTED` stays active in both modes (a dropped encoder is fatal to closed loop).
 

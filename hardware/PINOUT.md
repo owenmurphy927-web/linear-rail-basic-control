@@ -11,7 +11,7 @@ ESP32 dev board (`esp32dev`) driving a belt-and-pulley linear rail through a STE
 | 23 | `HOMING_PIN` | Home limit switch (near-end limit) — wired NC, so HIGH = pressed, LOW = released. `INPUT_PULLUP`. Used for homing; also acts as the near-end over-travel limit outside homing. |
 | 13 | `FAR_LIMIT_PIN` | Far end-of-travel limit switch — wired NC, so HIGH = pressed. `INPUT_PULLUP`. Over-travel failsafe only (not used during homing). |
 | 32 | `MS1_PIN` | Microstep select 1 |
-| 33 | `MS2_PIN` | Microstep select 2 (driver held at 1/4-step: MS1=LOW, MS2=HIGH) |
+| 33 | `MS2_PIN` | Microstep select 2. Currently 1/4-step (MS1=LOW, MS2=HIGH); full MS1/MS2 → resolution map in [`MICROSTEPPING.md`](MICROSTEPPING.md). |
 | 15 | `POS_JOG_PIN` | Positive-direction jog button, active LOW. `INPUT_PULLUP`. |
 | 16 | `NEG_JOG_PIN` | Negative-direction jog button, active LOW. `INPUT_PULLUP`. |
 | 17 | `ERROR_LED_PIN1` | Error indicator LED |
@@ -24,7 +24,7 @@ No pin conflicts between the stepper/switch/LED/jog set and the encoder's I2C pa
 
 ## Mechanical constants
 
-- `REV_STEPS = 800` — steps per motor revolution at the driver's configured 1/4-microstep setting.
+- `REV_STEPS = 800` — steps per motor revolution at the driver's configured 1/4-microstep setting. Derived from `ACTIVE_MICROSTEP` in code (not a standalone constant) — see [`MICROSTEPPING.md`](MICROSTEPPING.md).
 - `PULLEY_TEETH = 16`, `BELT_PITCH_MM = 2.0` → `MM_PER_REV = 32mm` of carriage travel per pulley revolution.
 - `STEPS_PER_MM = REV_STEPS / MM_PER_REV = 25 steps/mm`.
 - `HOME_PULL_OFF_MM = 5.0` — distance backed off the limit switch before the final slow re-approach during homing. Also places the near-switch trigger point at `-HOME_PULL_OFF_MM` relative to zero.

@@ -20,6 +20,9 @@ This plan will be carried out again once the pendulum payload is fixed; the **fi
 load-free** to standardize the testing. A more robust testing suite (and its potential issues) should
 be written up alongside the descoping rationale for future reference.
 
+Informal pre-test runs (used only to bracket the acceleration sweep, plus notes on the vibration seen
+at speed/midspan) are recorded in [`TESTING_OBSERVATIONS.md`](TESTING_OBSERVATIONS.md).
+
 ## What we're measuring: A_OL and A_CL
 
 Two acceleration limits, one per control mode:

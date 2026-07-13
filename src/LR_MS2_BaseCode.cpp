@@ -77,7 +77,7 @@ const int HOME_LED_PIN = 19;  //BLUE
 // setup() or the state machine. Boot defaults match the previous MAX_SPEED_HZ / ACCEL_STEPS_PER_S2.
 uint32_t motionSpeedHz         = 1600;   // positioning-move cruise speed (per moveTo), steps/s
 uint32_t motionAccelStepsPerS2 = 8000;   // ramp acceleration, steps/s^2
-const float JOG_SPEED          = 2400.0; // manual jog velocity, steps/s
+const float JOG_SPEED          = 4800.0; // manual jog velocity, steps/s
 
 // ---- Closed-loop position control (encoder feedback) ----
 // Active ONLY when controlMode == CLOSED_LOOP (see below); the OPEN_LOOP path is unchanged.

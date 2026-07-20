@@ -1,8 +1,9 @@
 # Serial telemetry format
 
 `printStatus()` (in `src/LR_MS2_BaseCode.cpp`) prints one condensed **CSV** line over the
-serial monitor (115200 baud), throttled to `PRINT_INTERVAL_MS`. Values only — no `key=`
-prefixes — to minimize print cost for logging; the first field is a `millis()` timestamp.
+serial monitor (115200 baud), throttled to `PRINT_INTERVAL_MS` — or the faster
+`TEST_PRINT_INTERVAL_MS` while `mode=TESTING`, so acceleration transients are resolved during a
+test run. Values only — no `key=` prefixes — to minimize print cost for logging; the first field is a `millis()` timestamp.
 A one-time `#`-prefixed **header row** is printed once at boot (from `setup()`) naming the
 columns, so MATLAB and other log parsers can map fields and skip the header. This file is
 the legend for those columns. **The `snprintf` format string in `printStatus()` is the
@@ -12,13 +13,13 @@ boot header string to match.
 Boot header (printed once):
 
 ```
-# t,ctrl,mode,phase,err,pos,vsps,vmms,enc,dpos,dmax,sp,cerr,mis,econn,eerr,lim,led
+# t,ctrl,mode,phase,err,pos,vsps,vmms,enc,dpos,dmax,sp,cerr,mis,econn,eerr,lim,led,accel
 ```
 
 Example data line (illustrative values):
 
 ```
-10432,OL,JOGGING,-,-,45.32,1600.0,64.00,45.28,0.040,0.112,111.30,66.02,0,1,0,00,010
+10432,OL,JOGGING,-,-,45.32,1600.0,64.00,45.28,0.040,0.112,111.30,66.02,0,1,0,00,010,12000
 ```
 
 ## Sign / frame conventions
@@ -35,7 +36,7 @@ Example data line (illustrative values):
 | `t`     | ms | **Timestamp** — `millis()` since boot (monotonic; wraps after ~49 days). Field 1; the time base for MATLAB plots. |
 | `ctrl`  | `OL` \| `CL` | Active control mode — Open-Loop (step count drives motion) or Closed-Loop (encoder feedback drives motion). Set by the `controlMode` compile-time global. |
 | `mode`  | enum | Top-level state machine mode. See decode below. |
-| `phase` | enum \| `-` | Homing sub-phase; `-` unless `mode=HOMING`. See decode below. |
+| `phase` | enum \| `-` | Sub-phase: the **homing** phase when `mode=HOMING`, the **test** phase when `mode=TESTING`, else `-`. See decodes below. |
 | `err`   | enum \| `-` | Error cause; `-` unless `mode=ERROR`. See decode below. |
 | `pos`   | mm | **Open-loop position** = stepper step count ÷ `STEPS_PER_MM`. The authority on position in open-loop mode. |
 | `vsps`  | steps/s | Current stepper speed (signed) from `getCurrentSpeedInMilliHz()`. |
@@ -50,6 +51,7 @@ Example data line (illustrative values):
 | `eerr`  | int | Encoder **last error** code from the AS5600 library (`railEncoder.lastError()`); `0` = `AS5600_OK`. |
 | `lim`   | 2 digits `NF` | End-of-travel switches, each `1`=pressed. **N** = near/home switch (`HOMING_PIN`), **F** = far switch (`FAR_LIMIT_PIN`). Both wired NC, so `HIGH`/`1` = pressed *or* a broken/disconnected lead (fail-safe). |
 | `led`   | 3 digits `HIE` | Status LED states, each `1`=on. **H** = HOME LED (blue), **I** = IDLE LED (green), **E** = ERROR LED. |
+| `accel` | steps/s² | Live commanded **acceleration** (`motionAccelStepsPerS2`). During a test ramp this is the per-move accel (each move = one level), the key field for correlating step-loss with acceleration. mm/s² = `accel ÷ STEPS_PER_MM`. |
 
 ## Enum decodes
 
@@ -67,6 +69,7 @@ Example data line (illustrative values):
 | `HOMING`  | Running the homing sequence |
 | `IDLE`    | Homed, stopped, holding position |
 | `JOGGING` | Manual jog via the buttons |
+| `TESTING` | Running the automated acceleration/step-loss ramp (see `docs/TEST_BATTERY.md`) |
 | `ERROR`   | Latched fault (terminal — needs reset/re-home) |
 
 `phase` — `homingPhaseText()` (only meaningful when `mode=HOMING`):
@@ -79,6 +82,15 @@ Example data line (illustrative values):
 | `SETTLE` | Wait for `forceStop` to drain before repositioning |
 | `ZERO`   | Pull off to zero and zero both position sources |
 | `DONE`   | Brief LED confirmation before handing off to `IDLE` |
+
+`phase` — `testPhaseText()` (only meaningful when `mode=TESTING`):
+
+| Value | Meaning |
+|---|---|
+| `WARM` | Warm-up oscillation (unrecorded — filter these rows out in post) |
+| `MOVE` | Driving one ramp move at the current `accel` |
+| `SET`  | Settling/holding at an endpoint between moves |
+| `DONE` | Sequence complete; handing back to `IDLE` |
 
 `err` — `errorModeText()` (only meaningful when `mode=ERROR`):
 

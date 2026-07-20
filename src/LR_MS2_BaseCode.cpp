@@ -16,6 +16,8 @@ const int MS2_PIN = 33;
 const int POS_JOG_PIN = 15;  // LOW is pressed
 const int NEG_JOG_PIN = 16;   // LOW is pressed
 
+const int TEST_START_PIN = 25;  // LOW is pressed -- normally-open button to GND, INPUT_PULLUP. Starts the automated test sequence (Mode::TESTING).
+
 const int ENCODER_SDA_PIN = 21;
 const int ENCODER_SCL_PIN = 22;
 
@@ -75,9 +77,40 @@ const int HOME_LED_PIN = 19;  //BLUE
 // runtime-mutable via setMotionSpeed()/setMotionAccel() (defined below, near the command helpers) so
 // test code can sweep them -- e.g. the acceleration ramp in docs/TESTING_PLAN.md -- without touching
 // setup() or the state machine. Boot defaults match the previous MAX_SPEED_HZ / ACCEL_STEPS_PER_S2.
-uint32_t motionSpeedHz         = 6000;   // positioning-move cruise speed (per moveTo), steps/s
-uint32_t motionAccelStepsPerS2 = 10000;   // ramp acceleration, steps/s^2
+uint32_t motionSpeedHz         = 10000;   // positioning-move cruise speed (per moveTo), steps/s
+uint32_t motionAccelStepsPerS2 = 12000;   // ramp acceleration, steps/s^2
 const float JOG_SPEED          = motionSpeedHz; // manual jog velocity, steps/s
+
+// ---- TEST CONFIG (automated acceleration / step-loss ramp -- Mode::TESTING) ----
+// Everything the test sequence needs, in one place, so a run can be re-parametrized without touching
+// the state machine. Started by pressing TEST_START_PIN while IDLE; see docs/TEST_BATTERY.md and
+// docs/TESTING_PLAN.md. Speeds/accels are in steps/s (/s^2). At the active microstep (STEPS_PER_MM,
+// = 25 at 1/4-step) mm/s^2 = steps-per-s^2 / STEPS_PER_MM -- the logged 'accel' column is steps/s^2.
+//
+// The ramp is 20 moves (10 back/forth) at a FIXED cruise speed; only the acceleration changes, one
+// LINEAR step per move: move i (0-based) uses accel = TEST_ACCEL_START + i*TEST_ACCEL_STEP. Tune
+// START/STEP so the later moves trip the open-loop position mismatch (see POSITION_MISMATCH_*), then
+// bisect with a narrower START and smaller STEP. Control mode (OL/CL) and microstep are compile-time
+// (controlMode / ACTIVE_MICROSTEP) -- reflash between them, keeping runs adjacent.
+const uint32_t TEST_CRUISE_SPEED_HZ  = 6000;    // fixed cruise speed for every ramp move, steps/s
+const uint32_t TEST_ACCEL_START      = 6000;    // acceleration of move 0, steps/s^2
+const uint32_t TEST_ACCEL_STEP       = 1000;    // per-move acceleration increment, steps/s^2 - final accel is TEST_ACCEL_START + ((TEST_NUM_MOVES - 1)/2) * TEST_ACCEL_STEP
+const int      TEST_NUM_MOVES        = 20;      // total moves (10 back-and-forth pairs)
+
+// Travel endpoints for each move. Default to the jog soft limits so the test uses the full safe span.
+const float TEST_NEAR_MM = JOG_MIN_POSITION_MM;  // near end (toward home)
+const float TEST_FAR_MM  = JOG_MAX_POSITION_MM;  // far end  (away from home)
+
+const unsigned long TEST_SETTLE_MS = 400;   // dwell after each move fully stops (clean stop + logged sample)
+
+// Warm-up: run gentle back-and-forth for >=1 min before the recorded ramp (rows tagged phase=WARM so
+// they can be dropped in post). Set TEST_WARMUP_ENABLED false to skip straight to the ramp.
+const bool          TEST_WARMUP_ENABLED     = true;
+const unsigned long TEST_WARMUP_DURATION_MS = 30000;  // >= 1 min per the testing plan
+const uint32_t      TEST_WARMUP_ACCEL_HZ2   = 4000;   // gentle warm-up acceleration, steps/s^2
+const uint32_t      TEST_WARMUP_SPEED_HZ    = 4000;   // gentle warm-up cruise speed, steps/s
+
+const unsigned long TEST_PRINT_INTERVAL_MS  = 20;     // 50 Hz telemetry while testing (normal run stays PRINT_INTERVAL_MS)
 
 // ---- Closed-loop position control (encoder feedback) ----
 // Active ONLY when controlMode == CLOSED_LOOP (see below); the OPEN_LOOP path is unchanged.
@@ -162,6 +195,10 @@ bool negJogPressed() {
   return digitalRead(NEG_JOG_PIN) == LOW;
 }
 
+bool testStartPressed() {
+  return digitalRead(TEST_START_PIN) == LOW;  // NO button to GND, INPUT_PULLUP: LOW is pressed
+}
+
 void microStep(bool MS1_STATE, bool MS2_STATE) {
   digitalWrite(MS1_PIN, MS1_STATE);
   digitalWrite(MS2_PIN, MS2_STATE);
@@ -240,8 +277,20 @@ enum class Mode {
   HOMING,
   IDLE,
   JOGGING,
+  TESTING,
   ERROR,
 
+};
+
+// Sub-phases of Mode::TESTING (the automated acceleration ramp). Mirrors HomingPhase: a small
+// non-blocking sub-state machine driven from the TESTING case in loop(). WARMUP oscillates to warm
+// the mechanics (rows tagged so they can be dropped); MOVING drives one ramp move; SETTLING dwells
+// after each move; FINISHED returns to IDLE. See the TEST CONFIG block and docs/TEST_BATTERY.md.
+enum class TestPhase {
+  WARMUP,
+  MOVING,
+  SETTLING,
+  FINISHED,
 };
 
 enum class HomingPhase {
@@ -284,6 +333,7 @@ void homeLight(bool state);
 //CGPT ADDITION - FOR PRINTING.........................................
   const char* modeText(Mode currentMode);
   const char* homingPhaseText(HomingPhase currentPhase);
+  const char* testPhaseText(TestPhase currentPhase);
   const char* errorModeText(ErrorMode currentError);
   const char* controlModeText(ControlMode m);
   void printStatus();
@@ -293,6 +343,15 @@ void homeLight(bool state);
 Mode mode = Mode::HOMING;
 HomingPhase homingPhase = HomingPhase::FAST_APPROACH;
 ErrorMode errorMode = ErrorMode::NO_ERROR;
+
+// Test-sequence state (Mode::TESTING). testPhase is the sub-state; testMoveIndex counts ramp moves
+// 0..TEST_NUM_MOVES-1; testTargetIsFar toggles the endpoint each move; testCurrentAccelHz2 is the
+// accel commanded for the current move (also mirrored into motionAccelStepsPerS2 and logged).
+TestPhase testPhase = TestPhase::WARMUP;
+int testMoveIndex = 0;
+bool testTargetIsFar = true;
+uint32_t testCurrentAccelHz2 = 0;
+bool testStartLatched = false;   // require the start button to be released before a new run can arm
 
 unsigned long stateStartTime = 0;
 unsigned long phaseStartTime = 0;
@@ -308,6 +367,47 @@ void changeState(Mode nextState) {
 void changeHomingPhase(HomingPhase nextPhase) {
   homingPhase = nextPhase;
   phaseStartTime = millis();
+}
+
+// Reuses phaseStartTime/phaseTimer (HOMING and TESTING never run at the same time) so the test
+// sub-state machine gets the same non-blocking dwell timing as homing.
+void changeTestPhase(TestPhase nextPhase) {
+  testPhase = nextPhase;
+  phaseStartTime = millis();
+}
+
+// Drive one automated test move toward targetMm, honoring the control mode -- the SAME OL/CL idiom as
+// the JOGGING endpoints, so a test move behaves exactly like a jog to that endpoint (and sp/cerr log
+// the target in both modes). speedHz is the cruise speed; the per-move acceleration is applied
+// separately via setMotionAccel() in testBeginMove(). Called every iteration while MOVING (the OL
+// commandMoveTo is cached; the CL servo needs the repeated call).
+void testDriveTo(float targetMm, uint32_t speedHz) {
+  clInHold = false;
+  clSetpointMm = targetMm;
+  if (controlMode == ControlMode::CLOSED_LOOP) {
+    closedLoopServoTo(clSetpointMm, speedHz, CL_TRAVEL_MAX_CORRECTION_MM);  // TRAVEL: large clamp
+  } else {
+    commandMoveTo(mmToSteps(targetMm), speedHz);
+  }
+}
+
+// A move is complete once the stepper has stopped; in closed-loop also require the encoder to be
+// within the servo deadband of the target so a genuinely-settled endpoint is what advances the ramp.
+bool testArrived(float targetMm) {
+  if (!stepper) return true;
+  if (stepper->isRunning()) return false;
+  if (controlMode == ControlMode::CLOSED_LOOP) {
+    return fabsf(targetMm - railEncoder.positionMm()) <= CL_DEADBAND_MM;
+  }
+  return true;
+}
+
+// Start ramp move testMoveIndex: compute its linear-ramp acceleration, push it to the stepper (takes
+// effect on the next planned move), and enter MOVING. accel(move i) = TEST_ACCEL_START + i*TEST_ACCEL_STEP.
+void testBeginMove() {
+  testCurrentAccelHz2 = TEST_ACCEL_START + (uint32_t)testMoveIndex * TEST_ACCEL_STEP;
+  setMotionAccel(testCurrentAccelHz2);
+  changeTestPhase(TestPhase::MOVING);
 }
 
 void changeErrorMode(ErrorMode nextMode) {
@@ -355,11 +455,33 @@ void idleLight(bool state) {
       case Mode::JOGGING:
         return "JOGGING";
 
+      case Mode::TESTING:
+        return "TESTING";
+
       case Mode::ERROR:
         return "ERROR";  // PLACEHOLDER MESSAGE
 
       default:
         return "UNKNOWN MODE";
+    }
+  }
+
+  const char* testPhaseText(TestPhase currentPhase) {
+    switch (currentPhase) {
+      case TestPhase::WARMUP:
+        return "WARM";
+
+      case TestPhase::MOVING:
+        return "MOVE";
+
+      case TestPhase::SETTLING:
+        return "SET";
+
+      case TestPhase::FINISHED:
+        return "DONE";
+
+      default:
+        return "UNK_PHASE";
     }
   }
 
@@ -426,12 +548,15 @@ void idleLight(bool state) {
   // the column names and the snprintf field order below stay together -- update BOTH (and
   // docs/TELEMETRY.md) if you add, rename, or reorder a field.
   static const char* TELEMETRY_CSV_HEADER =
-    "# t,ctrl,mode,phase,err,pos,vsps,vmms,enc,dpos,dmax,sp,cerr,mis,econn,eerr,lim,led";
+    "# t,ctrl,mode,phase,err,pos,vsps,vmms,enc,dpos,dmax,sp,cerr,mis,econn,eerr,lim,led,accel";
 
   void printStatus() {
     static unsigned long lastPrintTime = 0;
 
-    if (millis() - lastPrintTime < PRINT_INTERVAL_MS) {
+    // Faster sampling while a test runs (TEST_PRINT_INTERVAL_MS) so accel/decel transients are
+    // resolved; normal operation stays at PRINT_INTERVAL_MS.
+    unsigned long interval = (mode == Mode::TESTING) ? TEST_PRINT_INTERVAL_MS : PRINT_INTERVAL_MS;
+    if (millis() - lastPrintTime < interval) {
       return;
     }
 
@@ -453,10 +578,12 @@ void idleLight(bool state) {
       "%lu,%s,%s,%s,%s,"
       "%.2f,%.1f,%.2f,%.2f,%.3f,%.3f,"
       "%.2f,%.3f,"
-      "%d,%d,%d,%d%d,%d%d%d",
+      "%d,%d,%d,%d%d,%d%d%d,"
+      "%lu",
       millis(),
       controlModeText(controlMode), modeText(mode),
-      (mode == Mode::HOMING) ? homingPhaseText(homingPhase) : "-",
+      (mode == Mode::HOMING)  ? homingPhaseText(homingPhase) :
+      (mode == Mode::TESTING) ? testPhaseText(testPhase)     : "-",
       (mode == Mode::ERROR)  ? errorModeText(errorMode)     : "-",
       posMm, velSps, velMms, encMm, posMm - encMm, maxAbsPositionDiffMm,
       clSetpointMm, clSetpointMm - encMm,
@@ -465,7 +592,8 @@ void idleLight(bool state) {
       homeButtonPressed() ? 1 : 0, farLimitPressed() ? 1 : 0,
       (digitalRead(HOME_LED_PIN)   == HIGH) ? 1 : 0,
       (digitalRead(IDLE_LED_PIN)   == HIGH) ? 1 : 0,
-      (digitalRead(ERROR_LED_PIN1) == HIGH) ? 1 : 0);
+      (digitalRead(ERROR_LED_PIN1) == HIGH) ? 1 : 0,
+      (unsigned long)motionAccelStepsPerS2);  // accel: live commanded acceleration, steps/s^2 (mm/s^2 = /STEPS_PER_MM)
 
     Serial.println(buf);
   }
@@ -483,6 +611,7 @@ void setup() {
   pinMode(FAR_LIMIT_PIN, INPUT_PULLUP);
   pinMode(POS_JOG_PIN, INPUT_PULLUP);
   pinMode(NEG_JOG_PIN, INPUT_PULLUP);
+  pinMode(TEST_START_PIN, INPUT_PULLUP);
 
   pinMode(MS1_PIN, OUTPUT);
   pinMode(MS2_PIN, OUTPUT);
@@ -621,9 +750,26 @@ void loop() {
       } else {
         commandVelocity(0);                      // OPEN-LOOP: ensure stopped; hardware holds position when idle
       }
+        if (!testStartPressed()) testStartLatched = false;  // re-arm once the button is released
         if (posJogPressed() || negJogPressed()) {
           changeState(Mode::JOGGING);
           idleLight(LOW);
+        } else if (testStartPressed() && !testStartLatched) {
+          // Start the automated acceleration test (latched so one press = one run, and a still-held
+          // button after the run finishes doesn't immediately restart it).
+          testStartLatched = true;
+          idleLight(LOW);
+          testMoveIndex = 0;
+          testTargetIsFar = true;                // ramp starts heading to the far end
+          clInHold = false;
+          changeState(Mode::TESTING);
+          if (TEST_WARMUP_ENABLED) {
+            setMotionAccel(TEST_WARMUP_ACCEL_HZ2);
+            testCurrentAccelHz2 = TEST_WARMUP_ACCEL_HZ2;
+            changeTestPhase(TestPhase::WARMUP);
+          } else {
+            testBeginMove();                     // skip warm-up: set move-0 accel and go straight to MOVING
+          }
         }
       break;
 
@@ -669,6 +815,66 @@ void loop() {
         }
         break;
 
+    case Mode::TESTING:
+        // Automated acceleration / step-loss ramp -- see the TEST CONFIG block and docs/TEST_BATTERY.md.
+        // Non-blocking sub-state machine (WARMUP -> MOVING/SETTLING per move -> FINISHED). The
+        // over-travel failsafe above still guards this mode; dmax and encoder health are tracked in the
+        // post-switch guard below. Both jog buttons = manual abort back to IDLE (safety stop).
+        if (posJogPressed() && negJogPressed()) {
+          commandHalt();
+          changeState(Mode::IDLE);
+          break;
+        }
+        switch (testPhase) {
+          case TestPhase::WARMUP: {
+            if (phaseTimer(TEST_WARMUP_DURATION_MS)) {
+              // Duration elapsed: come to a FULL STOP before the recorded ramp. A ramp move issued
+              // while the carriage is still moving toward the far end can't decelerate at the low
+              // move-0 accel and overshoots the soft limit into the switch (see docs/PROBLEM_LOG.md).
+              // Start move 0 only from rest -- same rest guarantee SETTLING gives inter-move starts.
+              commandVelocity(0);
+              if (!stepper->isRunning()) {
+                testMoveIndex = 0;
+                testTargetIsFar = true;
+                testBeginMove();                  // begin the recorded ramp from rest
+              }
+            } else {
+              // Gentle back-and-forth to warm the mechanics; rows tag phase=WARM so they drop in post.
+              float target = testTargetIsFar ? TEST_FAR_MM : TEST_NEAR_MM;
+              testDriveTo(target, TEST_WARMUP_SPEED_HZ);
+              if (testArrived(target)) testTargetIsFar = !testTargetIsFar;  // bounce to the other end
+            }
+            break;
+          }
+          case TestPhase::MOVING: {
+            float target = testTargetIsFar ? TEST_FAR_MM : TEST_NEAR_MM;
+            testDriveTo(target, TEST_CRUISE_SPEED_HZ);
+            // Floor: don't test arrival until the just-issued move has had time to start (isRunning()
+            // latches true), so the first MOVING iteration can't be misread as already-arrived. Every
+            // ramp move spans near<->far (hundreds of ms), so this floor is never the limiting factor.
+            if (phaseTimer(50) && testArrived(target)) changeTestPhase(TestPhase::SETTLING);
+            break;
+          }
+          case TestPhase::SETTLING:
+            // Sit stopped so a clean, settled sample is logged before advancing accel.
+            if (controlMode == ControlMode::CLOSED_LOOP) closedLoopHold(); else commandVelocity(0);
+            if (phaseTimer(TEST_SETTLE_MS)) {
+              testMoveIndex++;
+              testTargetIsFar = !testTargetIsFar;   // next move heads to the opposite end
+              if (testMoveIndex >= TEST_NUM_MOVES) {
+                changeTestPhase(TestPhase::FINISHED);
+              } else {
+                testBeginMove();
+              }
+            }
+            break;
+          case TestPhase::FINISHED:
+            if (controlMode == ControlMode::CLOSED_LOOP) closedLoopHold(); else commandVelocity(0);
+            changeState(Mode::IDLE);             // sequence complete -> back to normal hold
+            break;
+        }
+        break;
+
     case Mode::ERROR:
       commandHalt();
 
@@ -698,7 +904,7 @@ void loop() {
       break;
   }
 
-  if (mode == Mode::IDLE || mode == Mode::JOGGING) {
+  if (mode == Mode::IDLE || mode == Mode::JOGGING || mode == Mode::TESTING) {
     if (!railEncoder.isConnected()) {
       changeErrorMode(ErrorMode::ENCODER_NOT_DETECTED);
       changeState(Mode::ERROR);

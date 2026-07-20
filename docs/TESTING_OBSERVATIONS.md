@@ -18,10 +18,13 @@ step/s ÷ 25 = mm/s).
 | 2 | CL | 8000 | 320 | 20000 | Major vibrations; desync / stall most likely. |
 | 3 | OL | 6000 | 240 | 10000 | Still vibrates, also at midspan / high speed. No noticeable step-loss errors. |
 | 4 | OL | 10000 | 400 | 12000 | Still vibrates; **independent of being lifted off the table.** Eventually drove the motor to decouple and hit a hard limit switch. |
+| 5 | OL | 6000 | 240 | up to 21000 | **After belt-tensioning screws added.** Automated ramp (`Mode::TESTING`) to 21k step/s²: **no noticeable step-loss errors and minimal vibration** — surpasses the previous OL error range (run 4 decoupled at 12k). Belt tension appears to be the dominant lever. |
 
 Key cross-cutting signals:
 - Vibration is **worst at midspan and at higher speed**, in both control modes.
-- **Belt tension reduces it** (run 1).
+- **Belt tension reduces it** (run 1), and appears to be the **dominant lever**: after dedicated
+  belt-tensioning screws were added, OL held 21k step/s² with minimal vibration and no step loss
+  (run 5) vs. decoupling at 12k before (run 4). Strong support for hypothesis #1 (belt compliance).
 - It is **independent of table coupling** (run 4, lifted off table) — the source is inside the
   rail/belt/motor system, not the mounting surface.
 - CL vs. OL does not change the vibration character — this is a **mechanical/motor** phenomenon, not a
